@@ -1,0 +1,279 @@
+import secrets
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Optional
+
+import aiosqlite
+
+
+@dataclass(frozen=True)
+class PmToken:
+    token: str
+    query_text: str
+    query_norm: str
+    created_at: int
+    expires_at: int
+
+
+@dataclass(frozen=True)
+class YtCandidate:
+    youtube_id: str
+    title: str
+    duration: Optional[int]
+    thumbnail_url: Optional[str]
+    source_url: str
+    rank: int
+
+
+class Database:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._conn: Optional[aiosqlite.Connection] = None
+
+    async def connect(self) -> None:
+        self._conn = await aiosqlite.connect(self._path)
+        self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL;")
+        await self._conn.execute("PRAGMA foreign_keys=ON;")
+        await self._conn.commit()
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+    async def init(self) -> None:
+        assert self._conn is not None
+        await self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT,
+                file_unique_id TEXT,
+                youtube_id TEXT,
+                source_url TEXT,
+                title TEXT,
+                duration INTEGER,
+                width INTEGER,
+                height INTEGER,
+                size INTEGER,
+                thumb_url TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS video_queries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_norm TEXT NOT NULL,
+                video_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(query_norm, video_id),
+                FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_video_queries_query
+                ON video_queries(query_norm);
+
+            CREATE TABLE IF NOT EXISTS pm_tokens (
+                token TEXT PRIMARY KEY,
+                query_text TEXT NOT NULL,
+                query_norm TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS yt_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL,
+                rank INTEGER NOT NULL,
+                youtube_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                duration INTEGER,
+                thumbnail_url TEXT,
+                source_url TEXT NOT NULL,
+                FOREIGN KEY(token) REFERENCES pm_tokens(token) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_yt_candidates_token
+                ON yt_candidates(token);
+            """
+        )
+        await self._conn.commit()
+
+    @staticmethod
+    def normalize_query(query: str) -> str:
+        return " ".join(query.strip().lower().split())
+
+    async def purge_expired_tokens(self, now: Optional[int] = None) -> None:
+        assert self._conn is not None
+        now_ts = now or int(time.time())
+        await self._conn.execute(
+            "DELETE FROM pm_tokens WHERE expires_at <= ?", (now_ts,)
+        )
+        await self._conn.commit()
+
+    async def create_pm_token(self, query_text: str, query_norm: str, ttl_seconds: int) -> PmToken:
+        assert self._conn is not None
+        token = secrets.token_hex(8)
+        now_ts = int(time.time())
+        expires = now_ts + ttl_seconds
+        await self._conn.execute(
+            "INSERT INTO pm_tokens (token, query_text, query_norm, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (token, query_text, query_norm, now_ts, expires),
+        )
+        await self._conn.commit()
+        return PmToken(
+            token=token,
+            query_text=query_text,
+            query_norm=query_norm,
+            created_at=now_ts,
+            expires_at=expires,
+        )
+
+    async def get_pm_token(self, token: str) -> Optional[PmToken]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT token, query_text, query_norm, created_at, expires_at FROM pm_tokens WHERE token = ?",
+            (token,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return PmToken(
+            token=row["token"],
+            query_text=row["query_text"],
+            query_norm=row["query_norm"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+        )
+
+    async def store_candidates(self, token: str, candidates: Iterable[YtCandidate]) -> None:
+        assert self._conn is not None
+        await self._conn.execute("DELETE FROM yt_candidates WHERE token = ?", (token,))
+        await self._conn.executemany(
+            """
+            INSERT INTO yt_candidates
+                (token, rank, youtube_id, title, duration, thumbnail_url, source_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    token,
+                    cand.rank,
+                    cand.youtube_id,
+                    cand.title,
+                    cand.duration,
+                    cand.thumbnail_url,
+                    cand.source_url,
+                )
+                for cand in candidates
+            ],
+        )
+        await self._conn.commit()
+
+    async def get_candidates(self, token: str) -> list[YtCandidate]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT youtube_id, title, duration, thumbnail_url, source_url, rank
+            FROM yt_candidates
+            WHERE token = ?
+            ORDER BY rank ASC
+            """,
+            (token,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            YtCandidate(
+                youtube_id=row["youtube_id"],
+                title=row["title"],
+                duration=row["duration"],
+                thumbnail_url=row["thumbnail_url"],
+                source_url=row["source_url"],
+                rank=row["rank"],
+            )
+            for row in rows
+        ]
+
+    async def create_video(
+        self,
+        *,
+        file_id: str,
+        file_unique_id: str,
+        youtube_id: str,
+        source_url: str,
+        title: str,
+        duration: Optional[int],
+        width: Optional[int],
+        height: Optional[int],
+        size: Optional[int],
+        thumb_url: Optional[str],
+    ) -> int:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO videos
+                (file_id, file_unique_id, youtube_id, source_url, title, duration, width, height, size, thumb_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                file_id,
+                file_unique_id,
+                youtube_id,
+                source_url,
+                title,
+                duration,
+                width,
+                height,
+                size,
+                thumb_url,
+                now_ts,
+            ),
+        )
+        await self._conn.commit()
+        return int(cursor.lastrowid)
+
+    async def link_query_to_video(self, query_norm: str, video_id: int) -> None:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO video_queries (query_norm, video_id, created_at) VALUES (?, ?, ?)",
+            (query_norm, video_id, now_ts),
+        )
+        await self._conn.commit()
+
+    async def find_cached_videos(self, query_norm: str, limit: int) -> list[dict]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT v.id, v.file_id, v.title, v.thumb_url
+            FROM videos v
+            JOIN video_queries q ON q.video_id = v.id
+            WHERE q.query_norm = ? AND v.file_id IS NOT NULL
+            ORDER BY q.created_at DESC
+            LIMIT ?
+            """,
+            (query_norm, limit),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(row) for row in rows]
+
+    async def get_video_by_id(self, video_id: int) -> Optional[dict]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT id, file_id, title, thumb_url
+            FROM videos
+            WHERE id = ?
+            """,
+            (video_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return dict(row)
