@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from .config import load_settings
 from .db import Database
 from .utils import format_duration
 from .piped import PipedClient, PipedError
-from .youtube import YtDlpError, download as yt_download
+from .youtube import YtDlpError, download as yt_download, fetch_video_info
 
 
 logger = logging.getLogger("vid_robot")
@@ -35,7 +36,6 @@ AGE_RESTRICTED_MARKERS = (
     "age-restricted",
     "age restricted",
 )
-
 
 def is_age_restricted_error(message: str) -> bool:
     lowered = message.lower()
@@ -104,19 +104,32 @@ class PrepManager:
         query_norm: str | None,
         inline_message_id: str | None,
     ) -> None:
+        streams = None
         try:
             streams = await self._piped.streams(youtube_id)
         except PipedError as exc:
+            logger.warning("Piped streams failed for %s: %s", youtube_id, exc)
+
+        info = None
+        if streams is None:
+            try:
+                info = await fetch_video_info(youtube_id)
+            except YtDlpError as exc:
+                logger.warning("yt-dlp info failed for %s: %s", youtube_id, exc)
+
+        if streams is None and info is None:
             await self._bot.send_message(
                 chat_id,
-                f"Не удалось получить данные: {exc}",
+                "Не удалось получить данные видео. Попробуйте другое.",
             )
             return
 
-        if streams.livestream:
+        if streams and streams.livestream:
             await self._bot.send_message(chat_id, "Стримы не поддерживаются, выбери другое.")
             return
-        if streams.duration is not None and streams.duration > 60:
+
+        duration = streams.duration if streams else info.duration
+        if duration is not None and duration > 60:
             await self._bot.send_message(
                 chat_id,
                 "Видео длиннее 1 минуты, выбери другое.",
@@ -164,17 +177,19 @@ class PrepManager:
             return
 
         video = upload_message.video
+        title = streams.title if streams else info.title
+        thumb_url = streams.thumbnail_url if streams else info.thumbnail_url
         video_id = await self._db.create_video(
             file_id=video.file_id,
             file_unique_id=video.file_unique_id,
-            youtube_id=streams.video_id,
-            source_url=f"https://www.youtube.com/watch?v={streams.video_id}",
-            title=streams.title,
+            youtube_id=youtube_id,
+            source_url=f"https://www.youtube.com/watch?v={youtube_id}",
+            title=title,
             duration=video.duration,
             width=video.width,
             height=video.height,
             size=video.file_size,
-            thumb_url=streams.thumbnail_url,
+            thumb_url=thumb_url,
         )
         if query_norm:
             await self._db.link_query_to_video(query_norm, video_id)
@@ -257,28 +272,6 @@ def build_inline_search_keyboard(query_text: str) -> InlineKeyboardMarkup:
     )
 
 
-def build_inline_retry_result(query_text: str) -> InlineQueryResultArticle:
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Повторить",
-                    switch_inline_query_current_chat=f"yt:{query_text}",
-                )
-            ]
-        ]
-    )
-    return InlineQueryResultArticle(
-        id=f"retry:{hash(query_text)}",
-        title="Поиск в YouTube",
-        description="Повторить поиск",
-        input_message_content=InputTextMessageContent(
-            message_text="Повторить поиск",
-        ),
-        reply_markup=keyboard,
-    )
-
-
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     load_dotenv()
@@ -295,9 +288,7 @@ async def main() -> None:
     piped = PipedClient(
         settings.piped_api_base_url,
         settings.piped_timeout_seconds,
-        settings.piped_api_base_urls,
     )
-    await piped.refresh()
 
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
@@ -308,35 +299,6 @@ async def main() -> None:
         settings.max_concurrent_jobs,
         piped,
     )
-
-    piped_cache: dict[str, tuple[float, list]] = {}
-    piped_pending: set[str] = set()
-
-    async def fetch_piped(query_text: str) -> None:
-        try:
-            results = await piped.search(query_text, 1)
-            results = [
-                cand
-                for cand in results
-                if cand.duration is None or cand.duration <= 60
-            ]
-            piped_cache[query_text] = (time.time(), results)
-        except PipedError as exc:
-            logger.warning("piped search failed: %s", exc)
-            piped_cache[query_text] = (time.time(), [])
-        finally:
-            piped_pending.discard(query_text)
-
-    async def piped_refresh_loop() -> None:
-        await asyncio.sleep(1800)
-        while True:
-            try:
-                await piped.refresh()
-            except PipedError as exc:
-                logger.warning("Piped refresh failed: %s", exc)
-            await asyncio.sleep(1800)
-
-    asyncio.create_task(piped_refresh_loop())
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -380,15 +342,21 @@ async def main() -> None:
             if not query_text:
                 await inline_query.answer([], is_personal=True, cache_time=1)
                 return
-            now_ts = time.time()
-            cached = piped_cache.get(query_text)
-            if cached and now_ts - cached[0] <= settings.piped_cache_ttl_seconds:
-                yt_candidates = cached[1]
-            else:
-                if query_text not in piped_pending:
-                    piped_pending.add(query_text)
-                    asyncio.create_task(fetch_piped(query_text))
+            try:
+                yt_candidates = await piped.search(
+                    query_text,
+                    settings.yt_inline_results,
+                )
+            except PipedError as exc:
+                logger.warning("piped search failed: %s", exc)
                 yt_candidates = []
+
+            if os.getenv("PIPED_DEBUG", "").strip().lower() in {"1", "true", "yes", "y", "on"}:
+                logger.info(
+                    "Piped inline candidates: total=%s first_id=%s",
+                    len(yt_candidates),
+                    yt_candidates[0].youtube_id if yt_candidates else None,
+                )
 
             results = []
             for cand in yt_candidates[:1]:
@@ -405,8 +373,12 @@ async def main() -> None:
                         ),
                     )
                 )
-            if not results:
-                results = [build_inline_retry_result(query_text)]
+            if os.getenv("PIPED_DEBUG", "").strip().lower() in {"1", "true", "yes", "y", "on"}:
+                logger.info(
+                    "Inline results count=%s first_title=%s",
+                    len(results),
+                    results[0].title if results else None,
+                )
             try:
                 await inline_query.answer(
                     results,
@@ -511,7 +483,6 @@ async def main() -> None:
             return
         if query_text.startswith("⏳ Готовлю видео"):
             return
-
         keyboard = build_inline_search_keyboard(query_text)
         await message.answer(
             f"Вот результаты по запросу: {query_text}",
