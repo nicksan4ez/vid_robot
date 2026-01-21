@@ -21,6 +21,7 @@ class YtCandidate:
     youtube_id: str
     title: str
     duration: Optional[int]
+    view_count: Optional[int]
     thumbnail_url: Optional[str]
     source_url: str
     rank: int
@@ -90,6 +91,7 @@ class Database:
                 youtube_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 duration INTEGER,
+                view_count INTEGER,
                 thumbnail_url TEXT,
                 source_url TEXT NOT NULL,
                 FOREIGN KEY(token) REFERENCES pm_tokens(token) ON DELETE CASCADE
@@ -104,6 +106,11 @@ class Database:
 
     async def _ensure_columns(self) -> None:
         assert self._conn is not None
+        await self._ensure_video_columns()
+        await self._ensure_candidate_columns()
+
+    async def _ensure_video_columns(self) -> None:
+        assert self._conn is not None
         cursor = await self._conn.execute("PRAGMA table_info(videos)")
         rows = await cursor.fetchall()
         await cursor.close()
@@ -111,6 +118,17 @@ class Database:
         if "use_count" not in columns:
             await self._conn.execute(
                 "ALTER TABLE videos ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+            )
+
+    async def _ensure_candidate_columns(self) -> None:
+        assert self._conn is not None
+        cursor = await self._conn.execute("PRAGMA table_info(yt_candidates)")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        columns = {row["name"] for row in rows}
+        if "view_count" not in columns:
+            await self._conn.execute(
+                "ALTER TABLE yt_candidates ADD COLUMN view_count INTEGER"
             )
 
     @staticmethod
@@ -167,8 +185,8 @@ class Database:
         await self._conn.executemany(
             """
             INSERT INTO yt_candidates
-                (token, rank, youtube_id, title, duration, thumbnail_url, source_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (token, rank, youtube_id, title, duration, view_count, thumbnail_url, source_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -177,6 +195,7 @@ class Database:
                     cand.youtube_id,
                     cand.title,
                     cand.duration,
+                    cand.view_count,
                     cand.thumbnail_url,
                     cand.source_url,
                 )
@@ -203,6 +222,7 @@ class Database:
                 youtube_id=row["youtube_id"],
                 title=row["title"],
                 duration=row["duration"],
+                view_count=row["view_count"],
                 thumbnail_url=row["thumbnail_url"],
                 source_url=row["source_url"],
                 rank=row["rank"],

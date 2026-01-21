@@ -94,9 +94,10 @@ async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandida
         raw_candidates.append((video_id, title, thumb))
 
     durations: dict[str, Optional[int]] = {}
+    view_counts: dict[str, Optional[int]] = {}
     if video_ids:
         params = {
-            "part": "contentDetails",
+            "part": "contentDetails,statistics",
             "id": ",".join(video_ids),
             "key": api_key,
         }
@@ -113,6 +114,10 @@ async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandida
                         duration_value = content.get("duration") or ""
                         if vid and isinstance(duration_value, str):
                             durations[vid] = _parse_iso_duration(duration_value)
+                        stats = item.get("statistics") or {}
+                        view_count = stats.get("viewCount")
+                        if vid and isinstance(view_count, str) and view_count.isdigit():
+                            view_counts[vid] = int(view_count)
 
     candidates: list[YtCandidate] = []
     for idx, (video_id, title, thumb) in enumerate(raw_candidates, start=1):
@@ -121,6 +126,7 @@ async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandida
                 youtube_id=video_id,
                 title=title,
                 duration=durations.get(video_id),
+                view_count=view_counts.get(video_id),
                 thumbnail_url=thumb,
                 source_url=f"https://www.youtube.com/watch?v={video_id}",
                 rank=idx,
@@ -132,7 +138,7 @@ async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandida
 
 async def fetch_video_info(video_id: str, api_key: str) -> Optional[YtCandidate]:
     params = {
-        "part": "snippet,contentDetails",
+        "part": "snippet,contentDetails,statistics",
         "id": video_id,
         "key": api_key,
     }
@@ -160,11 +166,18 @@ async def fetch_video_info(video_id: str, api_key: str) -> Optional[YtCandidate]
     duration_raw = content.get("duration") or ""
     duration = _parse_iso_duration(duration_raw) if isinstance(duration_raw, str) else None
     thumb = _pick_thumbnail(snippet)
+    stats = item.get("statistics") or {}
+    view_count = stats.get("viewCount")
+    if isinstance(view_count, str) and view_count.isdigit():
+        view_count_value = int(view_count)
+    else:
+        view_count_value = None
 
     return YtCandidate(
         youtube_id=video_id,
         title=title,
         duration=duration,
+        view_count=view_count_value,
         thumbnail_url=thumb,
         source_url=f"https://www.youtube.com/watch?v={video_id}",
         rank=1,

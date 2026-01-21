@@ -23,7 +23,7 @@ from aiogram.types.input_file import FSInputFile
 
 from .config import load_settings
 from .db import Database
-from .utils import format_duration, truncate_text
+from .utils import format_duration
 from .youtube import (
     YtDlpError,
     download as yt_download,
@@ -116,9 +116,7 @@ class PrepManager:
             await self._bot.send_message(chat_id, f"Не удалось скачать видео: {exc}")
             return
 
-        caption = candidate.title or None
-        if caption:
-            caption = truncate_text(caption, 1024)
+        caption = None
         try:
             upload_message = await self._bot.send_video(
                 chat_id,
@@ -160,7 +158,7 @@ class PrepManager:
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="📤 Отправить в чат…",
+                        text="📤 Отправить обратно в чат…",
                         switch_inline_query=f"ready:{video_id}",
                     )
                 ]
@@ -211,12 +209,22 @@ def build_switch_pm_text() -> str:
     return "Найти и подготовить 🎬 ≈ 10 сек"
 
 
+def format_views(value: int | None) -> str:
+    if value is None:
+        return "—"
+    if value < 1000:
+        return str(value)
+    if value < 1_000_000:
+        return f"{value / 1000:.1f}K".replace(".0", "")
+    return f"{value / 1_000_000:.1f}M".replace(".0", "")
+
+
 def build_inline_search_keyboard(query_text: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Показать результаты",
+                    text="Выбрать видео:",
                     switch_inline_query_current_chat=f"yt:{query_text}",
                 )
             ]
@@ -311,18 +319,21 @@ async def main() -> None:
                 if cand.duration is not None and cand.duration <= 60
             ]
 
-            results = [
-                InlineQueryResultArticle(
-                    id=f"yt:{cand.youtube_id}",
-                    title=cand.title,
-                    description="YouTube • " + format_duration(cand.duration),
-                    thumbnail_url=cand.thumbnail_url,
-                    input_message_content=InputTextMessageContent(
-                        message_text="⏳ Готовлю видео..."
-                    ),
+            results = []
+            for cand in yt_candidates:
+                duration = format_duration(cand.duration)
+                views = format_views(cand.view_count)
+                results.append(
+                    InlineQueryResultArticle(
+                        id=f"yt:{cand.youtube_id}",
+                        title=cand.title,
+                        description=f"YouTube • {duration} • {views}",
+                        thumbnail_url=cand.thumbnail_url,
+                        input_message_content=InputTextMessageContent(
+                            message_text="⏳ Готовлю видео..."
+                        ),
+                    )
                 )
-                for cand in yt_candidates
-            ]
             await inline_query.answer(results, is_personal=True, cache_time=1)
             return
 
@@ -404,7 +415,7 @@ async def main() -> None:
             return
         keyboard = build_inline_search_keyboard(token_info.query_text)
         await message.answer(
-            f"Вот результаты по запросу: {token_info.query_text}",
+            f"Нажми на кнопку и выбери нужное видео 👇",
             reply_markup=keyboard,
         )
 
