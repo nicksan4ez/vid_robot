@@ -14,7 +14,7 @@ Inline-бот Telegram для поиска и отправки коротких 
 Быстрый старт
 -------------
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -25,11 +25,12 @@ cp .env.example .env
 ```
 
 Далее задайте переменные окружения (минимум `BOT_TOKEN`).
+Также требуется `YOUTUBE_API_KEY` (YouTube Data API v3).
 
 Запуск
 ------
 ```bash
-python -m src.main
+python3 -m src.main
 ```
 
 Поведение

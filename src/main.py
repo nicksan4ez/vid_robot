@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
@@ -24,7 +25,7 @@ from aiogram.types.input_file import FSInputFile
 from .config import load_settings
 from .db import Database, YtCandidate
 from .utils import format_duration, truncate_text
-from .youtube import YtDlpError, download as yt_download, search as yt_search
+from .youtube import YtDlpError, download as yt_download, search_via_api
 
 
 logger = logging.getLogger("vid_robot")
@@ -74,7 +75,9 @@ class PrepManager:
         candidates = await self._db.get_candidates(token)
         if not candidates:
             try:
-                candidates = await yt_search(token_info.query_text, limit=3)
+                candidates = await search_via_api(
+                    token_info.query_text, limit=3, api_key=settings.youtube_api_key
+                )
                 await self._db.store_candidates(token, candidates)
             except YtDlpError as exc:
                 await self._bot.send_message(
@@ -226,6 +229,7 @@ def build_switch_pm_text(query: str) -> str:
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    load_dotenv()
 
     settings = load_settings()
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,7 +287,17 @@ async def main() -> None:
         switch_pm_parameter: Optional[str] = None
 
         try:
-            yt_candidates = await yt_search(query, settings.max_yt_results)
+            yt_candidates = await asyncio.wait_for(
+                search_via_api(
+                    query,
+                    settings.max_yt_results,
+                    api_key=settings.youtube_api_key,
+                ),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("yt-dlp search timed out")
+            yt_candidates = []
         except YtDlpError as exc:
             logger.warning("yt-dlp search failed: %s", exc)
             yt_candidates = []
@@ -310,13 +324,19 @@ async def main() -> None:
                         )
                     )
 
-        await inline_query.answer(
-            results,
-            is_personal=True,
-            cache_time=1,
-            switch_pm_text=switch_pm_text,
-            switch_pm_parameter=switch_pm_parameter,
-        )
+        try:
+            await inline_query.answer(
+                results,
+                is_personal=True,
+                cache_time=1,
+                switch_pm_text=switch_pm_text,
+                switch_pm_parameter=switch_pm_parameter,
+            )
+        except TelegramBadRequest as exc:
+            if "query is too old" in str(exc).lower():
+                logger.info("Inline query expired before response")
+                return
+            raise
 
     @dp.message(CommandStart())
     async def start_handler(message: Message, command: CommandObject) -> None:
@@ -345,7 +365,9 @@ async def main() -> None:
         candidates = await db.get_candidates(token)
         if not candidates:
             try:
-                candidates = await yt_search(token_info.query_text, limit=3)
+                candidates = await search_via_api(
+                    token_info.query_text, limit=3, api_key=settings.youtube_api_key
+                )
                 await db.store_candidates(token, candidates)
             except YtDlpError as exc:
                 await message.answer(f"Не удалось найти видео: {exc}")
@@ -371,7 +393,9 @@ async def main() -> None:
 
         query_norm = db.normalize_query(query_text)
         try:
-            yt_candidates = await yt_search(query_text, settings.max_yt_results)
+            yt_candidates = await search_via_api(
+                query_text, settings.max_yt_results, api_key=settings.youtube_api_key
+            )
         except YtDlpError as exc:
             await message.answer(f"Не удалось найти видео: {exc}")
             return

@@ -1,8 +1,10 @@
 import asyncio
-import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+import aiohttp
 
 from .db import YtCandidate
 
@@ -34,47 +36,93 @@ async def _run_yt_dlp(args: list[str]) -> tuple[int, str, str]:
     )
 
 
-async def search(query: str, limit: int) -> list[YtCandidate]:
-    args = [
-        "yt-dlp",
-        f"ytsearch{limit}:{query}",
-        "--skip-download",
-        "--dump-json",
-        "--no-warnings",
-        "--no-playlist",
-    ]
-    code, out, err = await _run_yt_dlp(args)
-    if code != 0:
-        raise YtDlpError(err.strip() or "yt-dlp search failed")
+_DURATION_RE = re.compile(r"^PT(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?$")
+
+
+def _parse_iso_duration(value: str) -> Optional[int]:
+    match = _DURATION_RE.match(value)
+    if not match:
+        return None
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _pick_thumbnail(snippet: dict) -> Optional[str]:
+    thumbnails = snippet.get("thumbnails") or {}
+    for key in ("high", "medium", "default"):
+        entry = thumbnails.get(key) or {}
+        url = entry.get("url")
+        if isinstance(url, str):
+            return url
+    return None
+
+
+async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandidate]:
+    params = {
+        "part": "snippet",
+        "type": "video",
+        "maxResults": str(limit),
+        "q": query,
+        "key": api_key,
+    }
+    timeout = aiohttp.ClientTimeout(total=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/search", params=params
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise YtDlpError(f"YouTube API search failed: {response.status} {text}")
+            payload = await response.json()
+
+    items = payload.get("items") or []
+    if not items:
+        return []
+
+    video_ids: list[str] = []
+    raw_candidates: list[tuple[str, str, Optional[str]]] = []
+    for item in items:
+        video_id = ((item.get("id") or {}).get("videoId")) or ""
+        snippet = item.get("snippet") or {}
+        title = snippet.get("title") or ""
+        if not video_id or not title:
+            continue
+        thumb = _pick_thumbnail(snippet)
+        video_ids.append(video_id)
+        raw_candidates.append((video_id, title, thumb))
+
+    durations: dict[str, Optional[int]] = {}
+    if video_ids:
+        params = {
+            "part": "contentDetails",
+            "id": ",".join(video_ids),
+            "key": api_key,
+        }
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://www.googleapis.com/youtube/v3/videos", params=params
+            ) as response:
+                if response.status == 200:
+                    details = await response.json()
+                    for item in details.get("items") or []:
+                        vid = item.get("id") or ""
+                        content = item.get("contentDetails") or {}
+                        duration_value = content.get("duration") or ""
+                        if vid and isinstance(duration_value, str):
+                            durations[vid] = _parse_iso_duration(duration_value)
 
     candidates: list[YtCandidate] = []
-    for idx, line in enumerate(out.splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        youtube_id = payload.get("id") or ""
-        title = payload.get("title") or ""
-        duration = payload.get("duration")
-        duration_value = None
-        if isinstance(duration, (int, float)):
-            duration_value = int(duration)
-        thumbnail = payload.get("thumbnail")
-        webpage_url = payload.get("webpage_url") or payload.get("original_url") or ""
-
-        if not youtube_id or not title or not webpage_url:
-            continue
-
+    for idx, (video_id, title, thumb) in enumerate(raw_candidates, start=1):
         candidates.append(
             YtCandidate(
-                youtube_id=youtube_id,
+                youtube_id=video_id,
                 title=title,
-                duration=duration_value,
-                thumbnail_url=thumbnail if isinstance(thumbnail, str) else None,
-                source_url=webpage_url,
+                duration=durations.get(video_id),
+                thumbnail_url=thumb,
+                source_url=f"https://www.youtube.com/watch?v={video_id}",
                 rank=idx,
             )
         )
