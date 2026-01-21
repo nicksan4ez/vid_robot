@@ -172,6 +172,8 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
             MAX_FILESIZE,
             "--merge-output-format",
             "mp4",
+            "--remux-video",
+            "mp4",
             "--no-playlist",
             "--no-warnings",
             "-o",

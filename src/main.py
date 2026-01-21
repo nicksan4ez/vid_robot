@@ -115,7 +115,11 @@ class PrepManager:
                 logger.warning("Failed to remove file %s", result.file_path)
 
         if video_message.video is None:
-            await self._bot.send_message(chat_id, "Не удалось получить данные видео.")
+            await self._bot.send_message(
+                chat_id,
+                "Не удалось отправить видео в нужном формате. "
+                "Проверьте, что установлен ffmpeg, и повторите попытку.",
+            )
             return
 
         video = video_message.video
