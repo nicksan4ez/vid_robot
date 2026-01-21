@@ -34,6 +34,17 @@ from .youtube import (
 
 logger = logging.getLogger("vid_robot")
 
+AGE_RESTRICTED_MARKERS = (
+    "sign in to confirm your age",
+    "age-restricted",
+    "age restricted",
+)
+
+
+def is_age_restricted_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in AGE_RESTRICTED_MARKERS)
+
 
 class PrepManager:
     def __init__(
@@ -113,7 +124,13 @@ class PrepManager:
         try:
             result = await yt_download(candidate.source_url, self._download_dir, job_id)
         except YtDlpError as exc:
-            await self._bot.send_message(chat_id, f"Не удалось скачать видео: {exc}")
+            if is_age_restricted_error(str(exc)):
+                await self._bot.send_message(
+                    chat_id,
+                    "🔞Бот слишком молод для такого видео, выбери другое",
+                )
+            else:
+                await self._bot.send_message(chat_id, f"Не удалось скачать видео: {exc}")
             return
 
         caption = None
