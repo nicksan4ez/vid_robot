@@ -1,0 +1,7 @@
+services:
+  vid_robot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
