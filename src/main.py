@@ -2,7 +2,6 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
@@ -10,89 +9,89 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.filters.command import CommandObject
 from aiogram.types import (
-    CallbackQuery,
+    ChosenInlineResult,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedVideo,
-    InputMediaPhoto,
     InputTextMessageContent,
     Message,
 )
 from aiogram.types.input_file import FSInputFile
 
 from .config import load_settings
-from .db import Database, YtCandidate
+from .db import Database
 from .utils import format_duration, truncate_text
-from .youtube import YtDlpError, download as yt_download, search_via_api
+from .youtube import (
+    YtDlpError,
+    download as yt_download,
+    fetch_video_info,
+    search_via_api,
+)
 
 
 logger = logging.getLogger("vid_robot")
 
 
 class PrepManager:
-    def __init__(self, bot: Bot, db: Database, download_dir: Path, max_concurrent: int) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        db: Database,
+        download_dir: Path,
+        max_concurrent: int,
+        youtube_api_key: str,
+    ) -> None:
         self._bot = bot
         self._db = db
         self._download_dir = download_dir
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._lock = asyncio.Lock()
         self._in_progress: set[str] = set()
+        self._youtube_api_key = youtube_api_key
 
-    async def start(self, token: str, chat_id: int) -> bool:
+    async def start_youtube(self, youtube_id: str, chat_id: int, query_norm: str | None) -> bool:
+        key = f"{chat_id}:{youtube_id}"
         async with self._lock:
-            if token in self._in_progress:
+            if key in self._in_progress:
                 return False
-            self._in_progress.add(token)
-        asyncio.create_task(self._run(token, chat_id))
+            self._in_progress.add(key)
+        asyncio.create_task(self._run_youtube(youtube_id, chat_id, query_norm, key))
         return True
 
-    async def _run(self, token: str, chat_id: int) -> None:
+    async def _run_youtube(
+        self, youtube_id: str, chat_id: int, query_norm: str | None, key: str
+    ) -> None:
         async with self._semaphore:
             try:
-                await self._process(token, chat_id)
+                await self._process_youtube(youtube_id, chat_id, query_norm)
             except Exception:
-                logger.exception("Preparation failed for token=%s", token)
+                logger.exception("Preparation failed for youtube_id=%s", youtube_id)
                 await self._bot.send_message(
                     chat_id,
                     "Не удалось подготовить видео. Попробуйте позже.",
                 )
             finally:
                 async with self._lock:
-                    self._in_progress.discard(token)
+                    self._in_progress.discard(key)
 
-    async def _process(self, token: str, chat_id: int) -> None:
-        token_info = await self._db.get_pm_token(token)
-        if token_info is None:
-            await self._bot.send_message(chat_id, "Ссылка устарела. Повторите поиск в inline.")
-            return
-        now_ts = int(time.time())
-        if token_info.expires_at <= now_ts:
-            await self._bot.send_message(chat_id, "Ссылка устарела. Повторите поиск в inline.")
-            return
-
-        candidates = await self._db.get_candidates(token)
-        if not candidates:
-            try:
-                candidates = await search_via_api(
-                    token_info.query_text, limit=3, api_key=settings.youtube_api_key
-                )
-                await self._db.store_candidates(token, candidates)
-            except YtDlpError as exc:
-                await self._bot.send_message(
-                    chat_id, f"Не удалось найти видео: {exc}"
-                )
-                return
-
-        if not candidates:
-            await self._bot.send_message(chat_id, "Ничего не нашлось по запросу.")
+    async def _process_youtube(
+        self, youtube_id: str, chat_id: int, query_norm: str | None
+    ) -> None:
+        try:
+            candidate = await fetch_video_info(youtube_id, self._youtube_api_key)
+        except YtDlpError as exc:
+            await self._bot.send_message(chat_id, f"Не удалось получить данные: {exc}")
             return
 
-        candidate = candidates[0]
+        if candidate is None:
+            await self._bot.send_message(chat_id, "Не удалось получить данные видео.")
+            return
+
         await self._bot.send_message(chat_id, "⏳ Готовлю видео...")
 
-        job_id = f"{token}-{candidate.youtube_id}"
+        job_id = f"yt-{youtube_id}"
         try:
             result = await yt_download(candidate.source_url, self._download_dir, job_id)
         except YtDlpError as exc:
@@ -135,7 +134,8 @@ class PrepManager:
             size=video.file_size,
             thumb_url=candidate.thumbnail_url,
         )
-        await self._db.link_query_to_video(token_info.query_norm, video_id)
+        if query_norm:
+            await self._db.link_query_to_video(query_norm, video_id)
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -162,73 +162,21 @@ class PrepManager:
             )
 
 
-def build_prepare_text(candidates: list[YtCandidate], query_text: str) -> str:
-    lines = ["Подготовка видео", "", f"Запрос: {query_text}", ""]
+def build_switch_pm_text() -> str:
+    return "Найти и подготовить 🎬 ≈ 10 сек"
 
-    for idx, cand in enumerate(candidates[:3], start=1):
-        duration = format_duration(cand.duration)
-        lines.append(f"{idx}. {cand.title}")
-        lines.append(f"⏱ {duration}")
-        lines.append(cand.source_url)
-        lines.append("")
 
-    return "\n".join(lines).strip()
-
-def build_prepare_keyboard(token: str) -> InlineKeyboardMarkup:
+def build_inline_search_keyboard(query_text: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Начать подготовку (≈ 10–30 сек)",
-                    callback_data=f"prep:{token}",
+                    text="Показать результаты",
+                    switch_inline_query_current_chat=f"yt:{query_text}",
                 )
             ]
         ]
     )
-
-
-async def send_prepare_prompt(
-    bot: Bot,
-    *,
-    chat_id: int,
-    candidates: list[YtCandidate],
-    query_text: str,
-    token: str,
-) -> None:
-    keyboard = build_prepare_keyboard(token)
-
-    media: list[InputMediaPhoto] = []
-    for cand in candidates[:3]:
-        if not cand.thumbnail_url:
-            continue
-        duration = format_duration(cand.duration)
-        caption = truncate_text(f"{cand.title}\n⏱ {duration}", 1024)
-        media.append(InputMediaPhoto(media=cand.thumbnail_url, caption=caption))
-
-    if media:
-        try:
-            await bot.send_media_group(chat_id, media)
-            await bot.send_message(
-                chat_id,
-                f"Подготовка видео\n\nЗапрос: {query_text}",
-                reply_markup=keyboard,
-            )
-            return
-        except TelegramBadRequest:
-            media = []
-
-    text = build_prepare_text(candidates, query_text)
-    await bot.send_message(
-        chat_id,
-        text,
-        reply_markup=keyboard,
-        disable_web_page_preview=True,
-    )
-
-
-def build_switch_pm_text(query: str) -> str:
-    base = f"🎬 Подготовить видео по запросу “{query}” (≈ 10–30 сек)"
-    return truncate_text(base, 64)
 
 
 async def main() -> None:
@@ -246,13 +194,30 @@ async def main() -> None:
 
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
-    prep_manager = PrepManager(bot, db, settings.download_dir, settings.max_concurrent_jobs)
+    prep_manager = PrepManager(
+        bot,
+        db,
+        settings.download_dir,
+        settings.max_concurrent_jobs,
+        settings.youtube_api_key,
+    )
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
         query = (inline_query.query or "").strip()
         if not query:
-            await inline_query.answer([], is_personal=True, cache_time=1)
+            popular = await db.get_popular_videos(settings.popular_inline_results)
+            results = [
+                InlineQueryResultCachedVideo(
+                    id=str(item["id"]),
+                    video_file_id=item["file_id"],
+                    title=item.get("title") or "Видео",
+                    description="Готовое",
+                    thumbnail_url=item.get("thumb_url"),
+                )
+                for item in popular
+            ]
+            await inline_query.answer(results, is_personal=True, cache_time=1)
             return
 
         if query.startswith("ready:"):
@@ -269,64 +234,84 @@ async def main() -> None:
                 video_file_id=video["file_id"],
                 title=video.get("title") or "Видео",
                 description="Готовое",
+                thumbnail_url=video.get("thumb_url"),
             )
             await inline_query.answer([result], is_personal=True, cache_time=1)
+            return
+
+        if query.startswith("yt:"):
+            query_text = query.split(":", 1)[1].strip()
+            if not query_text:
+                await inline_query.answer([], is_personal=True, cache_time=1)
+                return
+            try:
+                yt_candidates = await asyncio.wait_for(
+                    search_via_api(
+                        query_text,
+                        settings.max_yt_results,
+                        api_key=settings.youtube_api_key,
+                    ),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("YouTube API search timed out")
+                yt_candidates = []
+            except YtDlpError as exc:
+                logger.warning("YouTube API search failed: %s", exc)
+                yt_candidates = []
+
+            results = [
+                InlineQueryResultArticle(
+                    id=f"yt:{cand.youtube_id}",
+                    title=cand.title,
+                    description="YouTube • " + format_duration(cand.duration),
+                    thumbnail_url=cand.thumbnail_url,
+                    input_message_content=InputTextMessageContent(
+                        message_text="Подготовка видео…"
+                    ),
+                )
+                for cand in yt_candidates
+            ]
+            await inline_query.answer(results, is_personal=True, cache_time=1)
             return
 
         query_norm = db.normalize_query(query)
         cached = await db.find_cached_videos(query_norm, settings.max_inline_results)
         results: list = []
+        cached_ids: list[int] = []
 
         for item in cached:
+            cached_ids.append(int(item["id"]))
             results.append(
                 InlineQueryResultCachedVideo(
                     id=str(item["id"]),
                     video_file_id=item["file_id"],
                     title=item.get("title") or "Видео",
                     description="Готовое",
+                    thumbnail_url=item.get("thumb_url"),
                 )
             )
 
-        switch_pm_text: Optional[str] = None
-        switch_pm_parameter: Optional[str] = None
-
-        try:
-            yt_candidates = await asyncio.wait_for(
-                search_via_api(
-                    query,
-                    settings.max_yt_results,
-                    api_key=settings.youtube_api_key,
-                ),
-                timeout=3.0,
+        if len(results) < settings.max_inline_results:
+            remaining = settings.max_inline_results - len(results)
+            title_matches = await db.find_cached_videos_by_title(
+                query_norm, cached_ids, remaining
             )
-        except asyncio.TimeoutError:
-            logger.warning("yt-dlp search timed out")
-            yt_candidates = []
-        except YtDlpError as exc:
-            logger.warning("yt-dlp search failed: %s", exc)
-            yt_candidates = []
-
-        if yt_candidates:
-            await db.purge_expired_tokens()
-            token = await db.create_pm_token(query, query_norm, settings.pm_token_ttl_seconds)
-            await db.store_candidates(token.token, yt_candidates)
-
-            switch_pm_text = build_switch_pm_text(query)
-            switch_pm_parameter = f"pm-{token.token}"
-
-            if settings.inline_show_yt_cards:
-                for cand in yt_candidates[: settings.max_yt_results]:
-                    results.append(
-                        InlineQueryResultArticle(
-                            id=f"yt-{cand.youtube_id}",
-                            title=cand.title,
-                            description="Приготовить ≈ 10–30 сек",
-                            thumbnail_url=cand.thumbnail_url,
-                            input_message_content=InputTextMessageContent(
-                                message_text="Подготовка видео…"
-                            ),
-                        )
+            for item in title_matches:
+                results.append(
+                    InlineQueryResultCachedVideo(
+                        id=str(item["id"]),
+                        video_file_id=item["file_id"],
+                        title=item.get("title") or "Видео",
+                        description="Готовое",
+                        thumbnail_url=item.get("thumb_url"),
                     )
+                )
+
+        await db.purge_expired_tokens()
+        token = await db.create_pm_token(query, query_norm, settings.pm_token_ttl_seconds)
+        switch_pm_text = build_switch_pm_text()
+        switch_pm_parameter = f"pm-{token.token}"
 
         try:
             await inline_query.answer(
@@ -347,7 +332,7 @@ async def main() -> None:
         if not command.args:
             await message.answer(
                 "Привет! Используйте inline-режим: @vid_robot <запрос>\n"
-                "Для подготовки видео нажмите кнопку в inline-выдаче."
+                "Для подготовки видео нажмите кнопку «Найти и подготовить»."
             )
             return
 
@@ -366,27 +351,10 @@ async def main() -> None:
         if token_info.expires_at <= int(time.time()):
             await message.answer("Ссылка устарела. Повторите поиск в inline.")
             return
-        candidates = await db.get_candidates(token)
-        if not candidates:
-            try:
-                candidates = await search_via_api(
-                    token_info.query_text, limit=3, api_key=settings.youtube_api_key
-                )
-                await db.store_candidates(token, candidates)
-            except YtDlpError as exc:
-                await message.answer(f"Не удалось найти видео: {exc}")
-                return
-
-        if not candidates:
-            await message.answer("Ничего не нашлось по запросу.")
-            return
-
-        await send_prepare_prompt(
-            bot,
-            chat_id=message.chat.id,
-            candidates=candidates,
-            query_text=token_info.query_text,
-            token=token,
+        keyboard = build_inline_search_keyboard(token_info.query_text)
+        await message.answer(
+            f"Вот результаты по запросу: {token_info.query_text}",
+            reply_markup=keyboard,
         )
 
     @dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
@@ -395,40 +363,32 @@ async def main() -> None:
         if not query_text:
             return
 
-        query_norm = db.normalize_query(query_text)
-        try:
-            yt_candidates = await search_via_api(
-                query_text, settings.max_yt_results, api_key=settings.youtube_api_key
-            )
-        except YtDlpError as exc:
-            await message.answer(f"Не удалось найти видео: {exc}")
-            return
-
-        if not yt_candidates:
-            await message.answer("Ничего не нашлось по запросу.")
-            return
-
-        token = await db.create_pm_token(query_text, query_norm, settings.pm_token_ttl_seconds)
-        await db.store_candidates(token.token, yt_candidates)
-
-        await send_prepare_prompt(
-            bot,
-            chat_id=message.chat.id,
-            candidates=yt_candidates,
-            query_text=query_text,
-            token=token.token,
+        keyboard = build_inline_search_keyboard(query_text)
+        await message.answer(
+            f"Вот результаты по запросу: {query_text}",
+            reply_markup=keyboard,
         )
 
-    @dp.callback_query(F.data.startswith("prep:"))
-    async def prepare_callback(callback: CallbackQuery) -> None:
-        token = callback.data.split(":", 1)[1]
-        await callback.answer()
-        if callback.message is None:
+    @dp.chosen_inline_result()
+    async def chosen_inline_handler(chosen: ChosenInlineResult) -> None:
+        result_id = chosen.result_id or ""
+        if result_id.isdigit():
+            await db.increment_usage(int(result_id))
             return
-
-        started = await prep_manager.start(token, callback.message.chat.id)
-        if not started:
-            await callback.message.answer("Подготовка уже запущена.")
+        if result_id.startswith("yt:"):
+            youtube_id = result_id.split(":", 1)[1]
+            query_text = ""
+            if chosen.query and chosen.query.startswith("yt:"):
+                query_text = chosen.query.split(":", 1)[1].strip()
+            query_norm = db.normalize_query(query_text) if query_text else None
+            started = await prep_manager.start_youtube(
+                youtube_id, chosen.from_user.id, query_norm
+            )
+            if not started:
+                await bot.send_message(
+                    chosen.from_user.id,
+                    "Подготовка уже запущена для этого видео.",
+                )
 
     try:
         await dp.start_polling(bot)

@@ -130,6 +130,47 @@ async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandida
     return candidates
 
 
+async def fetch_video_info(video_id: str, api_key: str) -> Optional[YtCandidate]:
+    params = {
+        "part": "snippet,contentDetails",
+        "id": video_id,
+        "key": api_key,
+    }
+    timeout = aiohttp.ClientTimeout(total=5)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            "https://www.googleapis.com/youtube/v3/videos", params=params
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise YtDlpError(f"YouTube API videos failed: {response.status} {text}")
+            payload = await response.json()
+
+    items = payload.get("items") or []
+    if not items:
+        return None
+
+    item = items[0]
+    snippet = item.get("snippet") or {}
+    content = item.get("contentDetails") or {}
+    title = snippet.get("title") or ""
+    if not title:
+        return None
+
+    duration_raw = content.get("duration") or ""
+    duration = _parse_iso_duration(duration_raw) if isinstance(duration_raw, str) else None
+    thumb = _pick_thumbnail(snippet)
+
+    return YtCandidate(
+        youtube_id=video_id,
+        title=title,
+        duration=duration,
+        thumbnail_url=thumb,
+        source_url=f"https://www.youtube.com/watch?v={video_id}",
+        rank=1,
+    )
+
+
 def _cleanup_prefix(directory: Path, prefix: str) -> None:
     for path in directory.glob(f"{prefix}.*"):
         try:

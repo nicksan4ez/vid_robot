@@ -23,6 +23,7 @@ class Settings:
     db_path: Path
     download_dir: Path
     max_inline_results: int
+    popular_inline_results: int
     max_yt_results: int
     max_concurrent_jobs: int
     pm_token_ttl_seconds: int
@@ -46,6 +47,7 @@ def load_settings() -> Settings:
         db_path=db_path,
         download_dir=download_dir,
         max_inline_results=_get_int("MAX_INLINE_RESULTS", 10),
+        popular_inline_results=_get_int("POPULAR_INLINE_RESULTS", 20),
         max_yt_results=_get_int("MAX_YT_RESULTS", 5),
         max_concurrent_jobs=_get_int("MAX_CONCURRENT_JOBS", 2),
         pm_token_ttl_seconds=_get_int("PM_TOKEN_TTL_SECONDS", 3600),

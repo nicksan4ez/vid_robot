@@ -59,6 +59,7 @@ class Database:
                 height INTEGER,
                 size INTEGER,
                 thumb_url TEXT,
+                use_count INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             );
 
@@ -98,7 +99,19 @@ class Database:
                 ON yt_candidates(token);
             """
         )
+        await self._ensure_columns()
         await self._conn.commit()
+
+    async def _ensure_columns(self) -> None:
+        assert self._conn is not None
+        cursor = await self._conn.execute("PRAGMA table_info(videos)")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        columns = {row["name"] for row in rows}
+        if "use_count" not in columns:
+            await self._conn.execute(
+                "ALTER TABLE videos ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     @staticmethod
     def normalize_query(query: str) -> str:
@@ -216,8 +229,8 @@ class Database:
         cursor = await self._conn.execute(
             """
             INSERT INTO videos
-                (file_id, file_unique_id, youtube_id, source_url, title, duration, width, height, size, thumb_url, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (file_id, file_unique_id, youtube_id, source_url, title, duration, width, height, size, thumb_url, use_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 file_id,
@@ -230,6 +243,7 @@ class Database:
                 height,
                 size,
                 thumb_url,
+                0,
                 now_ts,
             ),
         )
@@ -261,6 +275,63 @@ class Database:
         rows = await cursor.fetchall()
         await cursor.close()
         return [dict(row) for row in rows]
+
+    async def find_cached_videos_by_title(
+        self, query_norm: str, exclude_ids: Iterable[int], limit: int
+    ) -> list[dict]:
+        assert self._conn is not None
+        exclude = list(exclude_ids)
+        like_value = f"%{query_norm}%"
+
+        if exclude:
+            placeholders = ",".join("?" for _ in exclude)
+            sql = (
+                "SELECT id, file_id, title, thumb_url "
+                "FROM videos "
+                "WHERE file_id IS NOT NULL AND lower(title) LIKE ? "
+                f"AND id NOT IN ({placeholders}) "
+                "ORDER BY use_count DESC, created_at DESC "
+                "LIMIT ?"
+            )
+            params = [like_value, *exclude, limit]
+        else:
+            sql = (
+                "SELECT id, file_id, title, thumb_url "
+                "FROM videos "
+                "WHERE file_id IS NOT NULL AND lower(title) LIKE ? "
+                "ORDER BY use_count DESC, created_at DESC "
+                "LIMIT ?"
+            )
+            params = [like_value, limit]
+
+        cursor = await self._conn.execute(sql, params)
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(row) for row in rows]
+
+    async def get_popular_videos(self, limit: int) -> list[dict]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT id, file_id, title, thumb_url
+            FROM videos
+            WHERE file_id IS NOT NULL
+            ORDER BY use_count DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(row) for row in rows]
+
+    async def increment_usage(self, video_id: int) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            "UPDATE videos SET use_count = use_count + 1 WHERE id = ?",
+            (video_id,),
+        )
+        await self._conn.commit()
 
     async def get_video_by_id(self, video_id: int) -> Optional[dict]:
         assert self._conn is not None
