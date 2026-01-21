@@ -25,7 +25,7 @@ cp .env.example .env
 ```
 
 Далее задайте переменные окружения (минимум `BOT_TOKEN`).
-Также требуется `YOUTUBE_API_KEY` (YouTube Data API v3).
+Для поиска используется Piped API, нужен `PIPED_API_BASE_URL` (можно добавить резервные в `PIPED_API_BASE_URLS`).
 
 Запуск
 ------
@@ -63,3 +63,7 @@ docker compose down
 - `yt-dlp` запускается как CLI. Если он недоступен в `PATH`, установите пакет через `pip`.
 - Значения лимитов и TTL настраиваются в `.env`.
 - `INLINE_SHOW_YT_CARDS=true` включает карточки YouTube в inline-выдаче (при выборе отправится нейтральное сообщение).
+- Для отладки `yt-dlp`: `YTDLP_DEBUG=1`, `YTDLP_DEBUG_LINES=5`, `YTDLP_TIMEOUT_SECONDS`, `YTDLP_SOCKET_TIMEOUT`.
+- Piped instance проверяется запросом к `/suggestions`. Если инстанс нестабилен — смените `PIPED_API_BASE_URL` или добавьте `PIPED_API_BASE_URLS`.
+- Для отладки Piped: `PIPED_DEBUG=1`.
+- Кэш поиска Piped управляется `PIPED_CACHE_TTL_SECONDS` (по умолчанию 120 секунд).

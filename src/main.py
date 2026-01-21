@@ -24,12 +24,8 @@ from aiogram.types.input_file import FSInputFile
 from .config import load_settings
 from .db import Database
 from .utils import format_duration
-from .youtube import (
-    YtDlpError,
-    download as yt_download,
-    fetch_video_info,
-    search_via_api,
-)
+from .piped import PipedClient, PipedError
+from .youtube import YtDlpError, download as yt_download
 
 
 logger = logging.getLogger("vid_robot")
@@ -53,7 +49,7 @@ class PrepManager:
         db: Database,
         download_dir: Path,
         max_concurrent: int,
-        youtube_api_key: str,
+        piped: PipedClient,
     ) -> None:
         self._bot = bot
         self._db = db
@@ -61,7 +57,7 @@ class PrepManager:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._lock = asyncio.Lock()
         self._in_progress: set[str] = set()
-        self._youtube_api_key = youtube_api_key
+        self._piped = piped
 
     async def start_youtube(
         self,
@@ -109,20 +105,32 @@ class PrepManager:
         inline_message_id: str | None,
     ) -> None:
         try:
-            candidate = await fetch_video_info(youtube_id, self._youtube_api_key)
-        except YtDlpError as exc:
-            await self._bot.send_message(chat_id, f"Не удалось получить данные: {exc}")
+            streams = await self._piped.streams(youtube_id)
+        except PipedError as exc:
+            await self._bot.send_message(
+                chat_id,
+                f"Не удалось получить данные: {exc}",
+            )
             return
 
-        if candidate is None:
-            await self._bot.send_message(chat_id, "Не удалось получить данные видео.")
+        if streams.livestream:
+            await self._bot.send_message(chat_id, "Стримы не поддерживаются, выбери другое.")
             return
-
+        if streams.duration is not None and streams.duration > 60:
+            await self._bot.send_message(
+                chat_id,
+                "Видео длиннее 1 минуты, выбери другое.",
+            )
+            return
         # Do not send extra status messages; user already sees the inline placeholder.
 
         job_id = f"yt-{youtube_id}"
         try:
-            result = await yt_download(candidate.source_url, self._download_dir, job_id)
+            result = await yt_download(
+                f"https://www.youtube.com/watch?v={youtube_id}",
+                self._download_dir,
+                job_id,
+            )
         except YtDlpError as exc:
             if is_age_restricted_error(str(exc)):
                 await self._bot.send_message(
@@ -159,14 +167,14 @@ class PrepManager:
         video_id = await self._db.create_video(
             file_id=video.file_id,
             file_unique_id=video.file_unique_id,
-            youtube_id=candidate.youtube_id,
-            source_url=candidate.source_url,
-            title=candidate.title,
+            youtube_id=streams.video_id,
+            source_url=f"https://www.youtube.com/watch?v={streams.video_id}",
+            title=streams.title,
             duration=video.duration,
             width=video.width,
             height=video.height,
             size=video.file_size,
-            thumb_url=candidate.thumbnail_url,
+            thumb_url=streams.thumbnail_url,
         )
         if query_norm:
             await self._db.link_query_to_video(query_norm, video_id)
@@ -249,6 +257,28 @@ def build_inline_search_keyboard(query_text: str) -> InlineKeyboardMarkup:
     )
 
 
+def build_inline_retry_result(query_text: str) -> InlineQueryResultArticle:
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Повторить",
+                    switch_inline_query_current_chat=f"yt:{query_text}",
+                )
+            ]
+        ]
+    )
+    return InlineQueryResultArticle(
+        id=f"retry:{hash(query_text)}",
+        title="Поиск в YouTube",
+        description="Повторить поиск",
+        input_message_content=InputTextMessageContent(
+            message_text="Повторить поиск",
+        ),
+        reply_markup=keyboard,
+    )
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     load_dotenv()
@@ -262,6 +292,13 @@ async def main() -> None:
     await db.init()
     await db.purge_expired_tokens()
 
+    piped = PipedClient(
+        settings.piped_api_base_url,
+        settings.piped_timeout_seconds,
+        settings.piped_api_base_urls,
+    )
+    await piped.refresh()
+
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
     prep_manager = PrepManager(
@@ -269,8 +306,37 @@ async def main() -> None:
         db,
         settings.download_dir,
         settings.max_concurrent_jobs,
-        settings.youtube_api_key,
+        piped,
     )
+
+    piped_cache: dict[str, tuple[float, list]] = {}
+    piped_pending: set[str] = set()
+
+    async def fetch_piped(query_text: str) -> None:
+        try:
+            results = await piped.search(query_text, 1)
+            results = [
+                cand
+                for cand in results
+                if cand.duration is None or cand.duration <= 60
+            ]
+            piped_cache[query_text] = (time.time(), results)
+        except PipedError as exc:
+            logger.warning("piped search failed: %s", exc)
+            piped_cache[query_text] = (time.time(), [])
+        finally:
+            piped_pending.discard(query_text)
+
+    async def piped_refresh_loop() -> None:
+        await asyncio.sleep(1800)
+        while True:
+            try:
+                await piped.refresh()
+            except PipedError as exc:
+                logger.warning("Piped refresh failed: %s", exc)
+            await asyncio.sleep(1800)
+
+    asyncio.create_task(piped_refresh_loop())
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -314,30 +380,18 @@ async def main() -> None:
             if not query_text:
                 await inline_query.answer([], is_personal=True, cache_time=1)
                 return
-            try:
-                yt_candidates = await asyncio.wait_for(
-                    search_via_api(
-                        query_text,
-                        settings.yt_inline_results,
-                        api_key=settings.youtube_api_key,
-                    ),
-                    timeout=5.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("YouTube API search timed out")
+            now_ts = time.time()
+            cached = piped_cache.get(query_text)
+            if cached and now_ts - cached[0] <= settings.piped_cache_ttl_seconds:
+                yt_candidates = cached[1]
+            else:
+                if query_text not in piped_pending:
+                    piped_pending.add(query_text)
+                    asyncio.create_task(fetch_piped(query_text))
                 yt_candidates = []
-            except YtDlpError as exc:
-                logger.warning("YouTube API search failed: %s", exc)
-                yt_candidates = []
-
-            yt_candidates = [
-                cand
-                for cand in yt_candidates
-                if cand.duration is not None and cand.duration <= 60
-            ]
 
             results = []
-            for cand in yt_candidates:
+            for cand in yt_candidates[:1]:
                 duration = format_duration(cand.duration)
                 views = format_views(cand.view_count)
                 results.append(
@@ -351,7 +405,19 @@ async def main() -> None:
                         ),
                     )
                 )
-            await inline_query.answer(results, is_personal=True, cache_time=1)
+            if not results:
+                results = [build_inline_retry_result(query_text)]
+            try:
+                await inline_query.answer(
+                    results,
+                    is_personal=True,
+                    cache_time=1,
+                )
+            except TelegramBadRequest as exc:
+                if "query is too old" in str(exc).lower():
+                    logger.info("Inline query expired before response")
+                    return
+                raise
             return
 
         query_norm = db.normalize_query(query)

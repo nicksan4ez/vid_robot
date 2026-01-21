@@ -1,14 +1,26 @@
 import asyncio
-import re
+import json
+import logging
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import aiohttp
-
 from .db import YtCandidate
 
 MAX_FILESIZE = "49M"
+logger = logging.getLogger("vid_robot.ytdlp")
+
+
+def _debug_enabled() -> tuple[bool, int]:
+    enabled = os.getenv("YTDLP_DEBUG", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    lines_raw = os.getenv("YTDLP_DEBUG_LINES", "5")
+    try:
+        lines = max(1, int(lines_raw))
+    except ValueError:
+        lines = 5
+    return enabled, lines
 
 
 class YtDlpError(RuntimeError):
@@ -30,105 +42,90 @@ async def _run_yt_dlp(args: list[str]) -> tuple[int, str, str]:
     except FileNotFoundError as exc:
         raise YtDlpError("yt-dlp is not installed or not in PATH") from exc
 
-    stdout, stderr = await process.communicate()
+    timeout_raw = os.getenv("YTDLP_TIMEOUT_SECONDS", "6")
+    try:
+        timeout = max(1.0, float(timeout_raw))
+    except ValueError:
+        timeout = 6.0
+
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        process.kill()
+        stdout, stderr = await process.communicate()
+        returncode = process.returncode if process.returncode is not None else -9
+        return (
+            returncode,
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace") + "\nyt-dlp timeout",
+        )
+
     return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode(
         "utf-8", errors="replace"
     )
 
 
-_DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
-
-
-def _parse_iso_duration(value: str) -> Optional[int]:
-    match = _DURATION_RE.match(value)
-    if not match:
-        return None
-    hours = int(match.group(1) or 0)
-    minutes = int(match.group(2) or 0)
-    seconds = int(match.group(3) or 0)
-    return hours * 3600 + minutes * 60 + seconds
-
-
-def _pick_thumbnail(snippet: dict) -> Optional[str]:
-    thumbnails = snippet.get("thumbnails") or {}
-    for key in ("high", "medium", "default"):
-        entry = thumbnails.get(key) or {}
-        url = entry.get("url")
-        if isinstance(url, str):
-            return url
-    return None
-
-
-async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandidate]:
-    params = {
-        "part": "snippet",
-        "type": "video",
-        "maxResults": str(limit),
-        "q": query,
-        "key": api_key,
-    }
-    timeout = aiohttp.ClientTimeout(total=5)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(
-            "https://www.googleapis.com/youtube/v3/search", params=params
-        ) as response:
-            if response.status != 200:
-                text = await response.text()
-                raise YtDlpError(f"YouTube API search failed: {response.status} {text}")
-            payload = await response.json()
-
-    items = payload.get("items") or []
-    if not items:
-        return []
-
-    video_ids: list[str] = []
-    raw_candidates: list[tuple[str, str, Optional[str]]] = []
-    for item in items:
-        video_id = ((item.get("id") or {}).get("videoId")) or ""
-        snippet = item.get("snippet") or {}
-        title = snippet.get("title") or ""
-        if not video_id or not title:
-            continue
-        thumb = _pick_thumbnail(snippet)
-        video_ids.append(video_id)
-        raw_candidates.append((video_id, title, thumb))
-
-    durations: dict[str, Optional[int]] = {}
-    view_counts: dict[str, Optional[int]] = {}
-    if video_ids:
-        params = {
-            "part": "contentDetails,statistics",
-            "id": ",".join(video_ids),
-            "key": api_key,
-        }
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                "https://www.googleapis.com/youtube/v3/videos", params=params
-            ) as response:
-                if response.status == 200:
-                    details = await response.json()
-                    for item in details.get("items") or []:
-                        vid = item.get("id") or ""
-                        content = item.get("contentDetails") or {}
-                        duration_value = content.get("duration") or ""
-                        if vid and isinstance(duration_value, str):
-                            durations[vid] = _parse_iso_duration(duration_value)
-                        stats = item.get("statistics") or {}
-                        view_count = stats.get("viewCount")
-                        if vid and isinstance(view_count, str) and view_count.isdigit():
-                            view_counts[vid] = int(view_count)
+async def search_via_ytdlp(query: str, limit: int) -> list[YtCandidate]:
+    socket_timeout = os.getenv("YTDLP_SOCKET_TIMEOUT", "").strip()
+    args = [
+        "yt-dlp",
+        f"ytsearch{limit}:{query}",
+        "--skip-download",
+        "--dump-json",
+        "--no-warnings",
+        "--no-playlist",
+    ]
+    if socket_timeout:
+        args.extend(["--socket-timeout", socket_timeout])
+    start = time.monotonic()
+    code, out, err = await _run_yt_dlp(args)
+    debug, lines = _debug_enabled()
+    if debug:
+        elapsed = time.monotonic() - start
+        logger.info("yt-dlp search args=%s elapsed=%.2fs code=%s", args, elapsed, code)
+        if err.strip():
+            logger.info(
+                "yt-dlp search stderr (first %s lines):\n%s",
+                lines,
+                "\n".join(err.splitlines()[:lines]),
+            )
+        if out.strip():
+            logger.info(
+                "yt-dlp search stdout (first %s lines):\n%s",
+                lines,
+                "\n".join(out.splitlines()[:lines]),
+            )
+    if code != 0:
+        raise YtDlpError(err.strip() or "yt-dlp search failed")
 
     candidates: list[YtCandidate] = []
-    for idx, (video_id, title, thumb) in enumerate(raw_candidates, start=1):
+    for idx, line in enumerate(out.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        youtube_id = payload.get("id") or ""
+        title = payload.get("title") or ""
+        duration = _extract_duration(payload)
+        thumbnail = payload.get("thumbnail")
+        webpage_url = payload.get("webpage_url") or payload.get("original_url") or ""
+        view_count_value = payload.get("view_count")
+        view_count = int(view_count_value) if isinstance(view_count_value, int) else None
+
+        if not youtube_id or not title or not webpage_url:
+            continue
+
         candidates.append(
             YtCandidate(
-                youtube_id=video_id,
+                youtube_id=youtube_id,
                 title=title,
-                duration=durations.get(video_id),
-                view_count=view_counts.get(video_id),
-                thumbnail_url=thumb,
-                source_url=f"https://www.youtube.com/watch?v={video_id}",
+                duration=duration,
+                view_count=view_count,
+                thumbnail_url=thumbnail if isinstance(thumbnail, str) else None,
+                source_url=webpage_url,
                 rank=idx,
             )
         )
@@ -136,52 +133,87 @@ async def search_via_api(query: str, limit: int, api_key: str) -> list[YtCandida
     return candidates
 
 
-async def fetch_video_info(video_id: str, api_key: str) -> Optional[YtCandidate]:
-    params = {
-        "part": "snippet,contentDetails,statistics",
-        "id": video_id,
-        "key": api_key,
-    }
-    timeout = aiohttp.ClientTimeout(total=5)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(
-            "https://www.googleapis.com/youtube/v3/videos", params=params
-        ) as response:
-            if response.status != 200:
-                text = await response.text()
-                raise YtDlpError(f"YouTube API videos failed: {response.status} {text}")
-            payload = await response.json()
+async def fetch_video_info(video_id: str) -> Optional[YtCandidate]:
+    socket_timeout = os.getenv("YTDLP_SOCKET_TIMEOUT", "").strip()
+    args = [
+        "yt-dlp",
+        f"https://www.youtube.com/watch?v={video_id}",
+        "--skip-download",
+        "--dump-json",
+        "--no-warnings",
+    ]
+    if socket_timeout:
+        args.extend(["--socket-timeout", socket_timeout])
+    start = time.monotonic()
+    code, out, err = await _run_yt_dlp(args)
+    debug, lines = _debug_enabled()
+    if debug:
+        elapsed = time.monotonic() - start
+        logger.info("yt-dlp info args=%s elapsed=%.2fs code=%s", args, elapsed, code)
+        if err.strip():
+            logger.info(
+                "yt-dlp info stderr (first %s lines):\n%s",
+                lines,
+                "\n".join(err.splitlines()[:lines]),
+            )
+        if out.strip():
+            logger.info(
+                "yt-dlp info stdout (first %s lines):\n%s",
+                lines,
+                "\n".join(out.splitlines()[:lines]),
+            )
+    if code != 0:
+        raise YtDlpError(err.strip() or "yt-dlp info failed")
 
-    items = payload.get("items") or []
-    if not items:
+    try:
+        payload = json.loads(out.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
         return None
 
-    item = items[0]
-    snippet = item.get("snippet") or {}
-    content = item.get("contentDetails") or {}
-    title = snippet.get("title") or ""
+    youtube_id = payload.get("id") or video_id
+    title = payload.get("title") or ""
     if not title:
         return None
-
-    duration_raw = content.get("duration") or ""
-    duration = _parse_iso_duration(duration_raw) if isinstance(duration_raw, str) else None
-    thumb = _pick_thumbnail(snippet)
-    stats = item.get("statistics") or {}
-    view_count = stats.get("viewCount")
-    if isinstance(view_count, str) and view_count.isdigit():
-        view_count_value = int(view_count)
-    else:
-        view_count_value = None
+    duration = _extract_duration(payload)
+    thumbnail = payload.get("thumbnail")
+    webpage_url = payload.get("webpage_url") or payload.get("original_url") or ""
+    view_count_value = payload.get("view_count")
+    view_count = int(view_count_value) if isinstance(view_count_value, int) else None
 
     return YtCandidate(
-        youtube_id=video_id,
+        youtube_id=youtube_id,
         title=title,
         duration=duration,
-        view_count=view_count_value,
-        thumbnail_url=thumb,
-        source_url=f"https://www.youtube.com/watch?v={video_id}",
+        view_count=view_count,
+        thumbnail_url=thumbnail if isinstance(thumbnail, str) else None,
+        source_url=webpage_url or f"https://www.youtube.com/watch?v={youtube_id}",
         rank=1,
     )
+
+
+def _extract_duration(payload: dict) -> Optional[int]:
+    duration_value = payload.get("duration")
+    if isinstance(duration_value, (int, float)):
+        return int(duration_value)
+    duration_string = payload.get("duration_string")
+    if isinstance(duration_string, str):
+        parsed = _parse_duration_string(duration_string)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_duration_string(value: str) -> Optional[int]:
+    parts = value.strip().split(":")
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return int(minutes) * 60 + int(seconds)
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        return int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+    return None
 
 
 def _cleanup_prefix(directory: Path, prefix: str) -> None:
