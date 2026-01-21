@@ -25,6 +25,7 @@ class Settings:
     max_inline_results: int
     popular_inline_results: int
     max_yt_results: int
+    yt_inline_results: int
     max_concurrent_jobs: int
     pm_token_ttl_seconds: int
     inline_show_yt_cards: bool
@@ -49,6 +50,7 @@ def load_settings() -> Settings:
         max_inline_results=_get_int("MAX_INLINE_RESULTS", 10),
         popular_inline_results=_get_int("POPULAR_INLINE_RESULTS", 20),
         max_yt_results=_get_int("MAX_YT_RESULTS", 5),
+        yt_inline_results=_get_int("YT_INLINE_RESULTS", 10),
         max_concurrent_jobs=_get_int("MAX_CONCURRENT_JOBS", 2),
         pm_token_ttl_seconds=_get_int("PM_TOKEN_TTL_SECONDS", 3600),
         inline_show_yt_cards=_get_bool("INLINE_SHOW_YT_CARDS", False),

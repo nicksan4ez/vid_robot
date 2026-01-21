@@ -15,6 +15,7 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedVideo,
+    InputMediaVideo,
     InputTextMessageContent,
     Message,
 )
@@ -51,21 +52,34 @@ class PrepManager:
         self._in_progress: set[str] = set()
         self._youtube_api_key = youtube_api_key
 
-    async def start_youtube(self, youtube_id: str, chat_id: int, query_norm: str | None) -> bool:
+    async def start_youtube(
+        self,
+        youtube_id: str,
+        chat_id: int,
+        query_norm: str | None,
+        inline_message_id: str | None,
+    ) -> bool:
         key = f"{chat_id}:{youtube_id}"
         async with self._lock:
             if key in self._in_progress:
                 return False
             self._in_progress.add(key)
-        asyncio.create_task(self._run_youtube(youtube_id, chat_id, query_norm, key))
+        asyncio.create_task(
+            self._run_youtube(youtube_id, chat_id, query_norm, inline_message_id, key)
+        )
         return True
 
     async def _run_youtube(
-        self, youtube_id: str, chat_id: int, query_norm: str | None, key: str
+        self,
+        youtube_id: str,
+        chat_id: int,
+        query_norm: str | None,
+        inline_message_id: str | None,
+        key: str,
     ) -> None:
         async with self._semaphore:
             try:
-                await self._process_youtube(youtube_id, chat_id, query_norm)
+                await self._process_youtube(youtube_id, chat_id, query_norm, inline_message_id)
             except Exception:
                 logger.exception("Preparation failed for youtube_id=%s", youtube_id)
                 await self._bot.send_message(
@@ -77,7 +91,11 @@ class PrepManager:
                     self._in_progress.discard(key)
 
     async def _process_youtube(
-        self, youtube_id: str, chat_id: int, query_norm: str | None
+        self,
+        youtube_id: str,
+        chat_id: int,
+        query_norm: str | None,
+        inline_message_id: str | None,
     ) -> None:
         try:
             candidate = await fetch_video_info(youtube_id, self._youtube_api_key)
@@ -89,7 +107,7 @@ class PrepManager:
             await self._bot.send_message(chat_id, "Не удалось получить данные видео.")
             return
 
-        await self._bot.send_message(chat_id, "⏳ Готовлю видео...")
+        # Do not send extra status messages; user already sees the inline placeholder.
 
         job_id = f"yt-{youtube_id}"
         try:
@@ -102,10 +120,11 @@ class PrepManager:
         if caption:
             caption = truncate_text(caption, 1024)
         try:
-            video_message = await self._bot.send_video(
+            upload_message = await self._bot.send_video(
                 chat_id,
                 FSInputFile(result.file_path),
                 caption=caption,
+                disable_notification=True,
             )
         finally:
             try:
@@ -113,7 +132,7 @@ class PrepManager:
             except Exception:
                 logger.warning("Failed to remove file %s", result.file_path)
 
-        if video_message.video is None:
+        if upload_message.video is None:
             await self._bot.send_message(
                 chat_id,
                 "Не удалось отправить видео в нужном формате. "
@@ -121,7 +140,7 @@ class PrepManager:
             )
             return
 
-        video = video_message.video
+        video = upload_message.video
         video_id = await self._db.create_video(
             file_id=video.file_id,
             file_unique_id=video.file_unique_id,
@@ -148,18 +167,44 @@ class PrepManager:
             ]
         )
 
-        try:
-            await self._bot.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=video_message.message_id,
-                reply_markup=keyboard,
-            )
-        except TelegramBadRequest:
-            await self._bot.send_message(
-                chat_id,
-                "Готово! Можно отправить в чат.",
-                reply_markup=keyboard,
-            )
+        if inline_message_id:
+            try:
+                await self._bot.edit_message_media(
+                    inline_message_id=inline_message_id,
+                    media=InputMediaVideo(
+                        media=video.file_id,
+                        caption=caption,
+                    ),
+                )
+                await self._bot.edit_message_reply_markup(
+                    inline_message_id=inline_message_id,
+                    reply_markup=keyboard,
+                )
+            except TelegramBadRequest:
+                await self._bot.send_message(
+                    chat_id,
+                    "Готово! Можно отправить в чат.",
+                    reply_markup=keyboard,
+                )
+        else:
+            try:
+                await self._bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=upload_message.message_id,
+                    reply_markup=keyboard,
+                )
+            except TelegramBadRequest:
+                await self._bot.send_message(
+                    chat_id,
+                    "Готово! Можно отправить в чат.",
+                    reply_markup=keyboard,
+                )
+
+        if inline_message_id:
+            try:
+                await self._bot.delete_message(chat_id, upload_message.message_id)
+            except TelegramBadRequest:
+                pass
 
 
 def build_switch_pm_text() -> str:
@@ -248,7 +293,7 @@ async def main() -> None:
                 yt_candidates = await asyncio.wait_for(
                     search_via_api(
                         query_text,
-                        settings.max_yt_results,
+                        settings.yt_inline_results,
                         api_key=settings.youtube_api_key,
                     ),
                     timeout=5.0,
@@ -260,6 +305,12 @@ async def main() -> None:
                 logger.warning("YouTube API search failed: %s", exc)
                 yt_candidates = []
 
+            yt_candidates = [
+                cand
+                for cand in yt_candidates
+                if cand.duration is not None and cand.duration <= 60
+            ]
+
             results = [
                 InlineQueryResultArticle(
                     id=f"yt:{cand.youtube_id}",
@@ -267,7 +318,7 @@ async def main() -> None:
                     description="YouTube • " + format_duration(cand.duration),
                     thumbnail_url=cand.thumbnail_url,
                     input_message_content=InputTextMessageContent(
-                        message_text="Подготовка видео…"
+                        message_text="⏳ Готовлю видео..."
                     ),
                 )
                 for cand in yt_candidates
@@ -359,8 +410,12 @@ async def main() -> None:
 
     @dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
     async def private_query_handler(message: Message) -> None:
+        if message.from_user and message.from_user.is_bot:
+            return
         query_text = message.text.strip()
         if not query_text:
+            return
+        if query_text.startswith("⏳ Готовлю видео"):
             return
 
         keyboard = build_inline_search_keyboard(query_text)
@@ -382,7 +437,10 @@ async def main() -> None:
                 query_text = chosen.query.split(":", 1)[1].strip()
             query_norm = db.normalize_query(query_text) if query_text else None
             started = await prep_manager.start_youtube(
-                youtube_id, chosen.from_user.id, query_norm
+                youtube_id,
+                chosen.from_user.id,
+                query_norm,
+                chosen.inline_message_id,
             )
             if not started:
                 await bot.send_message(

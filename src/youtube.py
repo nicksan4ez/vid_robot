@@ -36,7 +36,7 @@ async def _run_yt_dlp(args: list[str]) -> tuple[int, str, str]:
     )
 
 
-_DURATION_RE = re.compile(r"^PT(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?$")
+_DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
 
 
 def _parse_iso_duration(value: str) -> Optional[int]:
@@ -215,6 +215,10 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
             "mp4",
             "--remux-video",
             "mp4",
+            "--recode-video",
+            "mp4",
+            "--postprocessor-args",
+            "FFmpegVideoConvertor:-c:v libx264 -profile:v main -level 4.0 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart",
             "--no-playlist",
             "--no-warnings",
             "-o",

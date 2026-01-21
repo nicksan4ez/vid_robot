@@ -10,7 +10,7 @@ def format_duration(seconds: int | None) -> str:
     minutes, secs = divmod(rem, 60)
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
-    return f"{minutes}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def truncate_text(text: str, max_len: int) -> str:

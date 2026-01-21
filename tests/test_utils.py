@@ -9,8 +9,8 @@ def test_normalize_query() -> None:
 def test_format_duration() -> None:
     assert format_duration(None) == "?"
     assert format_duration(-1) == "?"
-    assert format_duration(59) == "0:59"
-    assert format_duration(61) == "1:01"
+    assert format_duration(59) == "00:59"
+    assert format_duration(61) == "01:01"
     assert format_duration(3601) == "1:00:01"
 
 
