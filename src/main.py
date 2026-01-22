@@ -305,8 +305,9 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="Помощь"),
-                KeyboardButton(text="Загрузить свое"),
+                KeyboardButton(text="🆘Помощь"),
+                KeyboardButton(text="🔍 Найти"),
+                KeyboardButton(text="⬇️Загрузить свое"),
             ]
         ],
         resize_keyboard=True,
@@ -640,6 +641,13 @@ async def main() -> None:
                 reply_markup=build_main_keyboard(),
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
+            )
+            return
+        if lowered in {"🔍 найти", "найти"}:
+            await message.answer(
+                "Открой inline и начни поиск: `@vid_robot yt:`",
+                reply_markup=build_main_keyboard(),
+                parse_mode="Markdown",
             )
             return
         if lowered in {"upload", "загрузить свое", "загрузить своё"}:
