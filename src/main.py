@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.filters.command import CommandObject
+from aiogram.types import CallbackQuery
 from aiogram.types import (
     ChosenInlineResult,
     InlineKeyboardButton,
@@ -19,6 +21,8 @@ from aiogram.types import (
     InputMediaVideo,
     InputTextMessageContent,
     Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
 )
 from aiogram.types.input_file import FSInputFile
 
@@ -27,6 +31,7 @@ from .db import Database, YtCandidate
 from .utils import format_duration
 from .piped import PipedClient, PipedError
 from .youtube import YtDlpError, download as yt_download
+from .youtube import fetch_video_info
 
 
 logger = logging.getLogger("vid_robot")
@@ -35,6 +40,11 @@ AGE_RESTRICTED_MARKERS = (
     "sign in to confirm your age",
     "age-restricted",
     "age restricted",
+)
+
+YOUTUBE_ID_RE = re.compile(
+    r"(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{6,})",
+    re.IGNORECASE,
 )
 
 def is_age_restricted_error(message: str) -> bool:
@@ -262,6 +272,39 @@ def build_inline_search_keyboard(query_text: str) -> InlineKeyboardMarkup:
     )
 
 
+def build_main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="help"),
+                KeyboardButton(text="upload"),
+            ]
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def build_upload_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data="upload_cancel",
+                )
+            ]
+        ]
+    )
+
+
+def extract_youtube_id(text: str) -> str | None:
+    match = YOUTUBE_ID_RE.search(text)
+    if not match:
+        return None
+    return match.group(1)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     load_dotenv()
@@ -290,6 +333,7 @@ async def main() -> None:
     )
     yt_cache: dict[str, tuple[float, YtCandidate]] = {}
     yt_cache_ttl = 600.0
+    upload_state: dict[int, dict] = {}
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -453,7 +497,8 @@ async def main() -> None:
         if not command.args:
             await message.answer(
                 "Привет! Используйте inline-режим: @vid_robot <запрос>\n"
-                "Для подготовки видео нажмите кнопку «Найти и подготовить»."
+                "Для подготовки видео нажмите кнопку «Найти и подготовить».",
+                reply_markup=build_main_keyboard(),
             )
             return
 
@@ -478,18 +523,157 @@ async def main() -> None:
             reply_markup=keyboard,
         )
 
+    @dp.callback_query(F.data == "upload_cancel")
+    async def upload_cancel_handler(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+        chat_id = callback.message.chat.id
+        upload_state.pop(chat_id, None)
+        try:
+            await callback.message.edit_text("Отменено.")
+        except TelegramBadRequest:
+            await callback.message.answer("Отменено.")
+        await callback.answer()
+
     @dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
     async def private_query_handler(message: Message) -> None:
         if message.from_user and message.from_user.is_bot:
             return
-        query_text = message.text.strip()
-        if not query_text:
+        text = message.text.strip()
+        if not text:
             return
-        if query_text.startswith("⏳ Готовлю видео"):
+        lowered = text.lower()
+        if lowered == "help":
+            await message.answer(settings.help_button_text, reply_markup=build_main_keyboard())
             return
-        keyboard = build_inline_search_keyboard(query_text)
+        if lowered == "upload":
+            prompt = (
+                "Для загрузки своего видео пришлите ссылку формата "
+                "(https://www.youtube.com/watch?v=dQw4w9WgXcQ). "
+                "Видео должно быть короче 60 секунд."
+            )
+            sent = await message.answer(
+                prompt,
+                reply_markup=build_upload_cancel_keyboard(),
+            )
+            upload_state[message.chat.id] = {
+                "stage": "await_link",
+                "message_id": sent.message_id,
+            }
+            return
+
+        state = upload_state.get(message.chat.id)
+        if state:
+            if state["stage"] == "await_link":
+                youtube_id = extract_youtube_id(text)
+                if not youtube_id:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=message.chat.id,
+                            message_id=state["message_id"],
+                            text=(
+                                "Неверная ссылка. Пришлите ссылку формата "
+                                "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                            ),
+                            reply_markup=build_upload_cancel_keyboard(),
+                        )
+                    except TelegramBadRequest:
+                        await message.answer(
+                            "Неверная ссылка. Пришлите ссылку формата "
+                            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                            reply_markup=build_upload_cancel_keyboard(),
+                        )
+                    return
+                info = None
+                try:
+                    info = await fetch_video_info(youtube_id)
+                except YtDlpError as exc:
+                    logger.warning("yt-dlp info failed for %s: %s", youtube_id, exc)
+                if info is None or info.duration is None:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=message.chat.id,
+                            message_id=state["message_id"],
+                            text="Не удалось получить данные видео. Попробуйте другую ссылку.",
+                            reply_markup=build_upload_cancel_keyboard(),
+                        )
+                    except TelegramBadRequest:
+                        await message.answer(
+                            "Не удалось получить данные видео. Попробуйте другую ссылку.",
+                            reply_markup=build_upload_cancel_keyboard(),
+                        )
+                    return
+                if info.duration > 60:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=message.chat.id,
+                            message_id=state["message_id"],
+                            text="Видео длиннее 1 минуты, выберите другое.",
+                            reply_markup=build_upload_cancel_keyboard(),
+                        )
+                    except TelegramBadRequest:
+                        await message.answer(
+                            "Видео длиннее 1 минуты, выберите другое.",
+                            reply_markup=build_upload_cancel_keyboard(),
+                        )
+                    return
+                upload_state[message.chat.id] = {
+                    "stage": "await_keywords",
+                    "message_id": state["message_id"],
+                    "youtube_id": youtube_id,
+                    "candidate": info,
+                }
+                try:
+                    await bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=state["message_id"],
+                        text="Напиши ключевые слова, чтобы легко найти это видео",
+                        reply_markup=build_upload_cancel_keyboard(),
+                    )
+                except TelegramBadRequest:
+                    await message.answer(
+                        "Напиши ключевые слова, чтобы легко найти это видео",
+                        reply_markup=build_upload_cancel_keyboard(),
+                    )
+                return
+
+            if state["stage"] == "await_keywords":
+                keywords = text.strip()
+                if not keywords:
+                    return
+                query_norm = db.normalize_query(keywords)
+                try:
+                    await bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=state["message_id"],
+                        text="⏳ Готовлю видео...",
+                    )
+                except TelegramBadRequest:
+                    await message.answer("⏳ Готовлю видео...")
+                started = await prep_manager.start_youtube(
+                    state["youtube_id"],
+                    message.chat.id,
+                    query_norm,
+                    None,
+                    state.get("candidate"),
+                )
+                if not started:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=message.chat.id,
+                            message_id=state["message_id"],
+                            text="Подготовка уже запущена для этого видео.",
+                        )
+                    except TelegramBadRequest:
+                        await message.answer("Подготовка уже запущена для этого видео.")
+                upload_state.pop(message.chat.id, None)
+                return
+
+        if text.startswith("⏳ Готовлю видео"):
+            return
+        keyboard = build_inline_search_keyboard(text)
         await message.answer(
-            f"Вот результаты по запросу: {query_text}",
+            f"Вот результаты по запросу: {text}",
             reply_markup=keyboard,
         )
 

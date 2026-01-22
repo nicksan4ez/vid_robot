@@ -30,6 +30,7 @@ class Settings:
     yt_inline_results: int
     max_concurrent_jobs: int
     pm_token_ttl_seconds: int
+    help_button_text: str
     piped_api_base_url: str
     piped_timeout_seconds: float
 
@@ -54,6 +55,7 @@ def load_settings() -> Settings:
         yt_inline_results=_get_int("YT_INLINE_RESULTS", 10),
         max_concurrent_jobs=_get_int("MAX_CONCURRENT_JOBS", 2),
         pm_token_ttl_seconds=_get_int("PM_TOKEN_TTL_SECONDS", 3600),
+        help_button_text=os.getenv("HELP_BUTTON", "Инструкция пока не задана."),
         piped_api_base_url=piped_base,
         piped_timeout_seconds=_get_float("PIPED_TIMEOUT_SECONDS", 4.0),
     )

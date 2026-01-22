@@ -86,7 +86,7 @@ async def fetch_video_info(video_id: str) -> Optional[YtCandidate]:
     if socket_timeout:
         args.extend(["--socket-timeout", socket_timeout])
     start = time.monotonic()
-    code, out, err = await _run_yt_dlp(args)
+    code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(30.0))
     debug, lines = _debug_enabled()
     if debug:
         elapsed = time.monotonic() - start
