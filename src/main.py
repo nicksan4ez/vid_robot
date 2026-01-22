@@ -353,7 +353,14 @@ async def main() -> None:
             filtered = [
                 cand
                 for cand in yt_candidates
-                if cand.duration is not None and cand.duration <= 60
+                if (
+                    cand.duration is not None
+                    and cand.duration <= 60
+                )
+                or (
+                    cand.is_short is True
+                    and (cand.duration is None or cand.duration <= 60)
+                )
             ]
             for cand in filtered[: settings.max_inline_results]:
                 yt_cache[cand.youtube_id] = (time.monotonic(), cand)
