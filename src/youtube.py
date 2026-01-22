@@ -177,9 +177,15 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
     output_dir.mkdir(parents=True, exist_ok=True)
 
     format_candidates = [
-        "bestvideo[height<=720]+bestaudio/best[height<=720]",
-        "bestvideo[height<=480]+bestaudio/best[height<=480]",
-        "bestvideo[height<=360]+bestaudio/best[height<=360]",
+        "bestvideo[ext=mp4][vcodec^=avc1][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]",
+        "bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]",
+        "bestvideo[ext=mp4][vcodec^=avc1][height<=360]+bestaudio[ext=m4a]/best[ext=mp4][height<=360]",
+        "bestvideo[vcodec^=avc1][height<=720]+bestaudio/best[height<=720]",
+        "bestvideo[vcodec^=avc1][height<=480]+bestaudio/best[height<=480]",
+        "bestvideo[vcodec^=avc1][height<=360]+bestaudio/best[height<=360]",
+        "best[ext=mp4][height<=720]",
+        "best[ext=mp4][height<=480]",
+        "best[ext=mp4][height<=360]",
         "best[height<=720]",
         "best[height<=480]",
         "best[height<=360]",

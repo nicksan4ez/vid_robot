@@ -8,7 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.filters.command import CommandObject
 from aiogram.types import CallbackQuery
 from aiogram.types import (
@@ -276,8 +276,8 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="help"),
-                KeyboardButton(text="upload"),
+                KeyboardButton(text="Помощь"),
+                KeyboardButton(text="Загрузить свое"),
             ]
         ],
         resize_keyboard=True,
@@ -523,6 +523,31 @@ async def main() -> None:
             reply_markup=keyboard,
         )
 
+    @dp.message(Command("help"))
+    async def help_handler(message: Message) -> None:
+        await message.answer(
+            settings.help_button_text,
+            reply_markup=build_main_keyboard(),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    @dp.message(Command("upload"))
+    async def upload_handler(message: Message) -> None:
+        prompt = (
+            "Для загрузки своего видео пришлите ссылку формата "
+            "(https://www.youtube.com/watch?v=dQw4w9WgXcQ). "
+            "Видео должно быть короче 60 секунд."
+        )
+        sent = await message.answer(
+            prompt,
+            reply_markup=build_upload_cancel_keyboard(),
+        )
+        upload_state[message.chat.id] = {
+            "stage": "await_link",
+            "message_id": sent.message_id,
+        }
+
     @dp.callback_query(F.data == "upload_cancel")
     async def upload_cancel_handler(callback: CallbackQuery) -> None:
         if callback.message is None:
@@ -535,6 +560,12 @@ async def main() -> None:
             await callback.message.answer("Отменено.")
         await callback.answer()
 
+    async def _safe_delete_message(chat_id: int, message_id: int) -> None:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except TelegramBadRequest:
+            pass
+
     @dp.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
     async def private_query_handler(message: Message) -> None:
         if message.from_user and message.from_user.is_bot:
@@ -543,10 +574,15 @@ async def main() -> None:
         if not text:
             return
         lowered = text.lower()
-        if lowered == "help":
-            await message.answer(settings.help_button_text, reply_markup=build_main_keyboard())
+        if lowered in {"help", "помощь"}:
+            await message.answer(
+                settings.help_button_text,
+                reply_markup=build_main_keyboard(),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
             return
-        if lowered == "upload":
+        if lowered in {"upload", "загрузить свое", "загрузить своё"}:
             prompt = (
                 "Для загрузки своего видео пришлите ссылку формата "
                 "(https://www.youtube.com/watch?v=dQw4w9WgXcQ). "
@@ -555,6 +591,7 @@ async def main() -> None:
             sent = await message.answer(
                 prompt,
                 reply_markup=build_upload_cancel_keyboard(),
+                disable_web_page_preview=True,
             )
             upload_state[message.chat.id] = {
                 "stage": "await_link",
@@ -576,14 +613,27 @@ async def main() -> None:
                                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
                             ),
                             reply_markup=build_upload_cancel_keyboard(),
+                            disable_web_page_preview=True,
                         )
                     except TelegramBadRequest:
                         await message.answer(
                             "Неверная ссылка. Пришлите ссылку формата "
                             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
                             reply_markup=build_upload_cancel_keyboard(),
+                            disable_web_page_preview=True,
                         )
                     return
+                await _safe_delete_message(message.chat.id, message.message_id)
+                try:
+                    await bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=state["message_id"],
+                        text=f"Проверю ваше видео:\n{message.text.strip()}",
+                        reply_markup=build_upload_cancel_keyboard(),
+                        disable_web_page_preview=True,
+                    )
+                except TelegramBadRequest:
+                    pass
                 info = None
                 try:
                     info = await fetch_video_info(youtube_id)
@@ -596,11 +646,13 @@ async def main() -> None:
                             message_id=state["message_id"],
                             text="Не удалось получить данные видео. Попробуйте другую ссылку.",
                             reply_markup=build_upload_cancel_keyboard(),
+                            disable_web_page_preview=True,
                         )
                     except TelegramBadRequest:
                         await message.answer(
                             "Не удалось получить данные видео. Попробуйте другую ссылку.",
                             reply_markup=build_upload_cancel_keyboard(),
+                            disable_web_page_preview=True,
                         )
                     return
                 if info.duration > 60:
@@ -610,11 +662,13 @@ async def main() -> None:
                             message_id=state["message_id"],
                             text="Видео длиннее 1 минуты, выберите другое.",
                             reply_markup=build_upload_cancel_keyboard(),
+                            disable_web_page_preview=True,
                         )
                     except TelegramBadRequest:
                         await message.answer(
                             "Видео длиннее 1 минуты, выберите другое.",
                             reply_markup=build_upload_cancel_keyboard(),
+                            disable_web_page_preview=True,
                         )
                     return
                 upload_state[message.chat.id] = {
@@ -627,12 +681,12 @@ async def main() -> None:
                     await bot.edit_message_text(
                         chat_id=message.chat.id,
                         message_id=state["message_id"],
-                        text="Напиши ключевые слова, чтобы легко найти это видео",
+                        text="Готово ☑️ Теперь напиши ключевые слова, чтобы легко найти это видео",
                         reply_markup=build_upload_cancel_keyboard(),
                     )
                 except TelegramBadRequest:
                     await message.answer(
-                        "Напиши ключевые слова, чтобы легко найти это видео",
+                        "Готово ☑️ Теперь напиши ключевые слова, чтобы легко найти это видео",
                         reply_markup=build_upload_cancel_keyboard(),
                     )
                 return
@@ -641,15 +695,26 @@ async def main() -> None:
                 keywords = text.strip()
                 if not keywords:
                     return
+                await _safe_delete_message(message.chat.id, message.message_id)
                 query_norm = db.normalize_query(keywords)
                 try:
                     await bot.edit_message_text(
                         chat_id=message.chat.id,
                         message_id=state["message_id"],
-                        text="⏳ Готовлю видео...",
+                        text=(
+                            f"Видео \"{state['candidate'].title}\" загружено, "
+                            f"ключевые слова: <code>{keywords}</code>"
+                        ),
+                        reply_markup=build_upload_cancel_keyboard(),
+                        parse_mode="HTML",
                     )
                 except TelegramBadRequest:
-                    await message.answer("⏳ Готовлю видео...")
+                    await message.answer(
+                        f"Видео \"{state['candidate'].title}\" загружено, "
+                        f"ключевые слова: <code>{keywords}</code>",
+                        reply_markup=build_upload_cancel_keyboard(),
+                        parse_mode="HTML",
+                    )
                 started = await prep_manager.start_youtube(
                     state["youtube_id"],
                     message.chat.id,
