@@ -31,6 +31,7 @@ class StreamInfo:
 
 
 _VIDEO_ID_RE = re.compile(r"[?&]v=([A-Za-z0-9_-]{6,})")
+_SHORTS_ID_RE = re.compile(r"/shorts/([A-Za-z0-9_-]{6,})")
 
 
 def _extract_video_id(item: dict) -> Optional[str]:
@@ -39,6 +40,9 @@ def _extract_video_id(item: dict) -> Optional[str]:
         return video_id
     url = item.get("url")
     if isinstance(url, str) and url:
+        match = _SHORTS_ID_RE.search(url)
+        if match:
+            return match.group(1)
         match = _VIDEO_ID_RE.search(url)
         if match:
             return match.group(1)
@@ -99,27 +103,86 @@ class PipedClient:
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise PipedError(f"{path} failed: {exc}") from exc
 
+    async def _post_json(self, base_url: str, path: str, payload: dict) -> object:
+        url = f"{base_url}{path}"
+        try:
+            async with aiohttp.ClientSession(timeout=self._timeout) as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        raise PipedError(f"{path} failed: {response.status} {text}")
+                    raw = await response.read()
+                    try:
+                        text = raw.decode("utf-8", errors="replace")
+                        return json.loads(text)
+                    except json.JSONDecodeError as exc:
+                        raise PipedError(f"{path} invalid JSON") from exc
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise PipedError(f"{path} failed: {exc}") from exc
+
+    def _extract_nextpage(self, data: object) -> Optional[dict]:
+        if not isinstance(data, dict):
+            return None
+        nextpage = data.get("nextpage")
+        if isinstance(nextpage, dict):
+            return nextpage
+        if isinstance(nextpage, str):
+            try:
+                return json.loads(nextpage)
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    async def _search_with_paging(self, params: dict, limit: int) -> list[YtCandidate]:
+        data = await self._get_json(self._base_url, "/search", params)
+        if _debug_enabled():
+            sample = json.dumps(data, ensure_ascii=False)[:800]
+            logger.info("Piped search payload sample=%s", sample)
+        candidates = parse_search_items(data, limit)
+        if len(candidates) >= limit:
+            return candidates
+
+        nextpage = self._extract_nextpage(data)
+        if not nextpage:
+            return candidates
+
+        seen = {cand.youtube_id for cand in candidates}
+        while nextpage and len(candidates) < limit:
+            try:
+                data = await self._post_json(self._base_url, "/nextpage", nextpage)
+            except PipedError as exc:
+                if _debug_enabled():
+                    logger.warning("Piped nextpage failed: %s", exc)
+                break
+            more = parse_search_items(data, limit - len(candidates))
+            if not more:
+                break
+            for cand in more:
+                if cand.youtube_id in seen:
+                    continue
+                candidates.append(cand)
+                seen.add(cand.youtube_id)
+                if len(candidates) >= limit:
+                    break
+            nextpage = self._extract_nextpage(data)
+        return candidates
+
     async def search(self, query: str, limit: int) -> list[YtCandidate]:
         params = dict(self._search_params["params"])
         q_key = self._search_params["q_key"]
         params[q_key] = query
         if _debug_enabled():
             logger.info("Piped search base=%s params=%s", self._base_url, params)
-        data = await self._get_json(self._base_url, "/search", params)
-        if _debug_enabled():
-            sample = json.dumps(data, ensure_ascii=False)[:800]
-            logger.info("Piped search payload sample=%s", sample)
-        candidates = parse_search_items(data, limit)
-        if not candidates and params.get("filter") == "videos":
+        candidates = await self._search_with_paging(params, limit)
+        if params.get("filter") == "videos":
             fallback_params = dict(params)
             fallback_params.pop("filter", None)
             if _debug_enabled():
                 logger.info("Piped search fallback params=%s", fallback_params)
-            data = await self._get_json(self._base_url, "/search", fallback_params)
-            if _debug_enabled():
-                sample = json.dumps(data, ensure_ascii=False)[:800]
-                logger.info("Piped search fallback payload sample=%s", sample)
-            candidates = parse_search_items(data, limit)
+            try:
+                candidates = await self._search_with_paging(fallback_params, limit)
+            except PipedError:
+                pass
         return candidates
 
     async def streams(self, video_id: str) -> StreamInfo:
@@ -176,6 +239,9 @@ def parse_search_items(data: object, limit: int) -> list[YtCandidate]:
         thumbnail_url = thumb if isinstance(thumb, str) else None
         view_count = _parse_view_count(item.get("views") or item.get("viewCount"))
         is_short = item.get("isShort")
+        url = item.get("url")
+        if isinstance(url, str) and "/shorts/" in url:
+            is_short = True
         if not isinstance(is_short, bool):
             is_short = None
 

@@ -100,6 +100,17 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_yt_candidates_token
                 ON yt_candidates(token);
+
+            CREATE TABLE IF NOT EXISTS user_video_stats (
+                user_id INTEGER NOT NULL,
+                video_id INTEGER NOT NULL,
+                use_count INTEGER NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, video_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_video_stats_user
+                ON user_video_stats(user_id, use_count DESC, last_used_at DESC);
             """
         )
         await self._ensure_columns()
@@ -330,18 +341,31 @@ class Database:
         await cursor.close()
         return [dict(row) for row in rows]
 
-    async def get_popular_videos(self, limit: int) -> list[dict]:
+    async def get_popular_videos(self, limit: int, exclude_ids: Optional[Iterable[int]] = None) -> list[dict]:
         assert self._conn is not None
-        cursor = await self._conn.execute(
-            """
-            SELECT id, file_id, title, thumb_url
-            FROM videos
-            WHERE file_id IS NOT NULL
-            ORDER BY use_count DESC, created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
+        exclude = list(exclude_ids) if exclude_ids else []
+        if exclude:
+            placeholders = ",".join("?" for _ in exclude)
+            sql = (
+                "SELECT id, file_id, title, thumb_url "
+                "FROM videos "
+                "WHERE file_id IS NOT NULL AND id NOT IN ("
+                f"{placeholders}"
+                ") "
+                "ORDER BY use_count DESC, created_at DESC "
+                "LIMIT ?"
+            )
+            params = [*exclude, limit]
+        else:
+            sql = (
+                "SELECT id, file_id, title, thumb_url "
+                "FROM videos "
+                "WHERE file_id IS NOT NULL "
+                "ORDER BY use_count DESC, created_at DESC "
+                "LIMIT ?"
+            )
+            params = [limit]
+        cursor = await self._conn.execute(sql, params)
         rows = await cursor.fetchall()
         await cursor.close()
         return [dict(row) for row in rows]
@@ -353,6 +377,58 @@ class Database:
             (video_id,),
         )
         await self._conn.commit()
+
+    async def upsert_user_video_stat(self, user_id: int, video_id: int) -> None:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        await self._conn.execute(
+            """
+            INSERT INTO user_video_stats (user_id, video_id, use_count, last_used_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, video_id)
+            DO UPDATE SET use_count = use_count + 1, last_used_at = excluded.last_used_at
+            """,
+            (user_id, video_id, now_ts),
+        )
+        await self._conn.commit()
+
+    async def get_user_top_videos(self, user_id: int, limit: int) -> list[dict]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT v.id, v.file_id, v.title, v.thumb_url
+            FROM user_video_stats s
+            JOIN videos v ON v.id = s.video_id
+            WHERE s.user_id = ? AND v.file_id IS NOT NULL
+            ORDER BY s.use_count DESC, s.last_used_at DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(row) for row in rows]
+
+    async def get_user_ranked_video_ids(
+        self, user_id: int, video_ids: Iterable[int]
+    ) -> list[int]:
+        assert self._conn is not None
+        ids = list(video_ids)
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT video_id
+            FROM user_video_stats
+            WHERE user_id = ? AND video_id IN ({placeholders})
+            ORDER BY use_count DESC, last_used_at DESC
+            """,
+            (user_id, *ids),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [int(row["video_id"]) for row in rows]
 
     async def get_video_by_id(self, video_id: int) -> Optional[dict]:
         assert self._conn is not None

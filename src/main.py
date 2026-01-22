@@ -375,17 +375,34 @@ async def main() -> None:
     async def inline_query_handler(inline_query: InlineQuery) -> None:
         query = (inline_query.query or "").strip()
         if not query:
-            popular = await db.get_popular_videos(settings.popular_inline_results)
-            results = [
-                InlineQueryResultCachedVideo(
-                    id=str(item["id"]),
-                    video_file_id=item["file_id"],
-                    title=item.get("title") or "Видео",
-                    description="Готовое",
-                    thumbnail_url=item.get("thumb_url"),
+            user_id = inline_query.from_user.id
+            personal = await db.get_user_top_videos(user_id, settings.popular_inline_results)
+            personal_ids = {int(item["id"]) for item in personal}
+            remaining = settings.popular_inline_results - len(personal)
+            popular = []
+            if remaining > 0:
+                popular = await db.get_popular_videos(remaining, exclude_ids=personal_ids)
+            results = []
+            for item in personal:
+                results.append(
+                    InlineQueryResultCachedVideo(
+                        id=f"vid:{item['id']}",
+                        video_file_id=item["file_id"],
+                        title=item.get("title") or "Видео",
+                        description="Часто используемое",
+                        thumbnail_url=item.get("thumb_url"),
+                    )
                 )
-                for item in popular
-            ]
+            for item in popular:
+                results.append(
+                    InlineQueryResultCachedVideo(
+                        id=f"vid:{item['id']}",
+                        video_file_id=item["file_id"],
+                        title=item.get("title") or "Видео",
+                        description="Популярное",
+                        thumbnail_url=item.get("thumb_url"),
+                    )
+                )
             await inline_query.answer(results, is_personal=True, cache_time=1)
             return
 
@@ -399,7 +416,7 @@ async def main() -> None:
                 await inline_query.answer([], is_personal=True, cache_time=1)
                 return
             result = InlineQueryResultCachedVideo(
-                id=str(video["id"]),
+                id=f"vid:{video['id']}",
                 video_file_id=video["file_id"],
                 title=video.get("title") or "Видео",
                 description="Готовое",
@@ -434,12 +451,8 @@ async def main() -> None:
                 cand
                 for cand in yt_candidates
                 if (
-                    cand.duration is not None
-                    and cand.duration <= 60
-                )
-                or (
                     cand.is_short is True
-                    and (cand.duration is None or cand.duration <= 60)
+                    or (cand.duration is not None and cand.duration <= 60)
                 )
             ]
             for cand in filtered[: settings.max_inline_results]:
@@ -480,18 +493,11 @@ async def main() -> None:
         cached = await db.find_cached_videos(query_norm, settings.max_inline_results)
         results: list = []
         cached_ids: list[int] = []
+        cached_items: list[dict] = []
 
         for item in cached:
             cached_ids.append(int(item["id"]))
-            results.append(
-                InlineQueryResultCachedVideo(
-                    id=str(item["id"]),
-                    video_file_id=item["file_id"],
-                    title=item.get("title") or "Видео",
-                    description="Готовое",
-                    thumbnail_url=item.get("thumb_url"),
-                )
-            )
+            cached_items.append(item)
 
         if len(results) < settings.max_inline_results:
             remaining = settings.max_inline_results - len(results)
@@ -499,12 +505,27 @@ async def main() -> None:
                 query_norm, cached_ids, remaining
             )
             for item in title_matches:
+                cached_items.append(item)
+
+        if cached_items:
+            user_id = inline_query.from_user.id
+            item_map = {int(item["id"]): item for item in cached_items}
+            ordered_ids = await db.get_user_ranked_video_ids(
+                user_id, item_map.keys()
+            )
+            personal_ids = set(ordered_ids)
+            ordered_items = [item_map[vid] for vid in ordered_ids if vid in item_map]
+            for item in cached_items:
+                if int(item["id"]) not in personal_ids:
+                    ordered_items.append(item)
+            for item in ordered_items:
+                is_personal = int(item["id"]) in personal_ids
                 results.append(
                     InlineQueryResultCachedVideo(
-                        id=str(item["id"]),
+                        id=f"vid:{item['id']}",
                         video_file_id=item["file_id"],
                         title=item.get("title") or "Видео",
-                        description="Готовое",
+                        description="Часто используемое" if is_personal else "Готовое",
                         thumbnail_url=item.get("thumb_url"),
                     )
                 )
@@ -798,8 +819,12 @@ async def main() -> None:
     @dp.chosen_inline_result()
     async def chosen_inline_handler(chosen: ChosenInlineResult) -> None:
         result_id = chosen.result_id or ""
-        if result_id.isdigit():
-            await db.increment_usage(int(result_id))
+        if result_id.startswith("vid:"):
+            raw_id = result_id.split(":", 1)[1]
+            if raw_id.isdigit():
+                video_id = int(raw_id)
+                await db.increment_usage(video_id)
+                await db.upsert_user_video_stat(chosen.from_user.id, video_id)
             return
         if result_id.startswith("yt:"):
             youtube_id = result_id.split(":", 1)[1]
