@@ -328,6 +328,19 @@ def build_upload_cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def build_inline_search_button() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔍 Найти",
+                    switch_inline_query_current_chat="yt: ",
+                )
+            ]
+        ]
+    )
+
+
 def extract_youtube_id(text: str) -> str | None:
     match = YOUTUBE_ID_RE.search(text)
     if not match:
@@ -645,8 +658,8 @@ async def main() -> None:
             return
         if lowered in {"🔍 найти", "найти"}:
             await message.answer(
-                "Открой inline и начни поиск: `@vid_robot yt:`",
-                reply_markup=build_main_keyboard(),
+                "Открой inline и начни поиск: `@vid_robot yt:`\n\nЛибо нажми кнопку ниже 👇",
+                reply_markup=build_inline_search_button(),
                 parse_mode="Markdown",
             )
             return
