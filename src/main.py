@@ -663,7 +663,7 @@ async def main() -> None:
                 parse_mode="Markdown",
             )
             return
-        if lowered in {"upload", "загрузить свое", "загрузить своё"}:
+        if lowered in {"upload", "загрузить свое", "загрузить своё", "⬇️загрузить свое", "⬇️загрузить своё"}:
             prompt = (
                 "Для загрузки своего видео пришлите ссылку формата "
                 "`https://www.youtube.com/watch?v=dQw4w9WgXcQ` "
