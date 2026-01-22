@@ -350,7 +350,12 @@ async def main() -> None:
                 )
 
             results = []
-            for cand in yt_candidates[: settings.max_inline_results]:
+            filtered = [
+                cand
+                for cand in yt_candidates
+                if cand.duration is not None and cand.duration <= 60
+            ]
+            for cand in filtered[: settings.max_inline_results]:
                 yt_cache[cand.youtube_id] = (time.monotonic(), cand)
                 duration = format_duration(cand.duration)
                 views = format_views(cand.view_count)

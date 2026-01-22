@@ -25,6 +25,7 @@ class YtCandidate:
     thumbnail_url: Optional[str]
     source_url: str
     rank: int
+    is_short: Optional[bool] = None
 
 
 class Database:

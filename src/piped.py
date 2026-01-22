@@ -175,6 +175,9 @@ def parse_search_items(data: object, limit: int) -> list[YtCandidate]:
         thumb = item.get("thumbnail") or item.get("thumbnailUrl")
         thumbnail_url = thumb if isinstance(thumb, str) else None
         view_count = _parse_view_count(item.get("views") or item.get("viewCount"))
+        is_short = item.get("isShort")
+        if not isinstance(is_short, bool):
+            is_short = None
 
         if not video_id:
             continue
@@ -187,6 +190,7 @@ def parse_search_items(data: object, limit: int) -> list[YtCandidate]:
                 thumbnail_url=thumbnail_url,
                 source_url=f"https://www.youtube.com/watch?v={video_id}",
                 rank=idx,
+                is_short=is_short,
             )
         )
 
