@@ -32,7 +32,17 @@ class DownloadResult:
     file_path: Path
 
 
-async def _run_yt_dlp(args: list[str]) -> tuple[int, str, str]:
+def _get_timeout(default: float) -> float:
+    timeout_raw = os.getenv("YTDLP_TIMEOUT_SECONDS", "").strip()
+    if not timeout_raw:
+        return default
+    try:
+        return max(default, float(timeout_raw))
+    except ValueError:
+        return default
+
+
+async def _run_yt_dlp(args: list[str], timeout_seconds: float | None = None) -> tuple[int, str, str]:
     try:
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -42,11 +52,10 @@ async def _run_yt_dlp(args: list[str]) -> tuple[int, str, str]:
     except FileNotFoundError as exc:
         raise YtDlpError("yt-dlp is not installed or not in PATH") from exc
 
-    timeout_raw = os.getenv("YTDLP_TIMEOUT_SECONDS", "6")
-    try:
-        timeout = max(1.0, float(timeout_raw))
-    except ValueError:
-        timeout = 6.0
+    if timeout_seconds is None:
+        timeout = _get_timeout(6.0)
+    else:
+        timeout = max(1.0, timeout_seconds)
 
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -201,7 +210,7 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
             "-o",
             output_template,
         ]
-        code, out, err = await _run_yt_dlp(args)
+        code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(120.0))
         if code == 0:
             path = _find_downloaded_file(output_dir, job_id)
             if path is not None and path.exists():

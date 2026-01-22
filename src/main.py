@@ -23,10 +23,10 @@ from aiogram.types import (
 from aiogram.types.input_file import FSInputFile
 
 from .config import load_settings
-from .db import Database
+from .db import Database, YtCandidate
 from .utils import format_duration
 from .piped import PipedClient, PipedError
-from .youtube import YtDlpError, download as yt_download, fetch_video_info
+from .youtube import YtDlpError, download as yt_download
 
 
 logger = logging.getLogger("vid_robot")
@@ -49,7 +49,6 @@ class PrepManager:
         db: Database,
         download_dir: Path,
         max_concurrent: int,
-        piped: PipedClient,
     ) -> None:
         self._bot = bot
         self._db = db
@@ -57,7 +56,6 @@ class PrepManager:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._lock = asyncio.Lock()
         self._in_progress: set[str] = set()
-        self._piped = piped
 
     async def start_youtube(
         self,
@@ -65,6 +63,7 @@ class PrepManager:
         chat_id: int,
         query_norm: str | None,
         inline_message_id: str | None,
+        candidate: YtCandidate | None,
     ) -> bool:
         key = f"{chat_id}:{youtube_id}"
         async with self._lock:
@@ -72,7 +71,14 @@ class PrepManager:
                 return False
             self._in_progress.add(key)
         asyncio.create_task(
-            self._run_youtube(youtube_id, chat_id, query_norm, inline_message_id, key)
+            self._run_youtube(
+                youtube_id,
+                chat_id,
+                query_norm,
+                inline_message_id,
+                candidate,
+                key,
+            )
         )
         return True
 
@@ -82,11 +88,18 @@ class PrepManager:
         chat_id: int,
         query_norm: str | None,
         inline_message_id: str | None,
+        candidate: YtCandidate | None,
         key: str,
     ) -> None:
         async with self._semaphore:
             try:
-                await self._process_youtube(youtube_id, chat_id, query_norm, inline_message_id)
+                await self._process_youtube(
+                    youtube_id,
+                    chat_id,
+                    query_norm,
+                    inline_message_id,
+                    candidate,
+                )
             except Exception:
                 logger.exception("Preparation failed for youtube_id=%s", youtube_id)
                 await self._bot.send_message(
@@ -103,32 +116,9 @@ class PrepManager:
         chat_id: int,
         query_norm: str | None,
         inline_message_id: str | None,
+        candidate: YtCandidate | None,
     ) -> None:
-        streams = None
-        try:
-            streams = await self._piped.streams(youtube_id)
-        except PipedError as exc:
-            logger.warning("Piped streams failed for %s: %s", youtube_id, exc)
-
-        info = None
-        if streams is None:
-            try:
-                info = await fetch_video_info(youtube_id)
-            except YtDlpError as exc:
-                logger.warning("yt-dlp info failed for %s: %s", youtube_id, exc)
-
-        if streams is None and info is None:
-            await self._bot.send_message(
-                chat_id,
-                "Не удалось получить данные видео. Попробуйте другое.",
-            )
-            return
-
-        if streams and streams.livestream:
-            await self._bot.send_message(chat_id, "Стримы не поддерживаются, выбери другое.")
-            return
-
-        duration = streams.duration if streams else info.duration
+        duration = candidate.duration if candidate else None
         if duration is not None and duration > 60:
             await self._bot.send_message(
                 chat_id,
@@ -177,8 +167,8 @@ class PrepManager:
             return
 
         video = upload_message.video
-        title = streams.title if streams else info.title
-        thumb_url = streams.thumbnail_url if streams else info.thumbnail_url
+        title = candidate.title if candidate else "Видео"
+        thumb_url = candidate.thumbnail_url if candidate else None
         video_id = await self._db.create_video(
             file_id=video.file_id,
             file_unique_id=video.file_unique_id,
@@ -297,8 +287,9 @@ async def main() -> None:
         db,
         settings.download_dir,
         settings.max_concurrent_jobs,
-        piped,
     )
+    yt_cache: dict[str, tuple[float, YtCandidate]] = {}
+    yt_cache_ttl = 600.0
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -345,7 +336,7 @@ async def main() -> None:
             try:
                 yt_candidates = await piped.search(
                     query_text,
-                    settings.yt_inline_results,
+                    settings.max_inline_results,
                 )
             except PipedError as exc:
                 logger.warning("piped search failed: %s", exc)
@@ -359,7 +350,8 @@ async def main() -> None:
                 )
 
             results = []
-            for cand in yt_candidates[:1]:
+            for cand in yt_candidates[: settings.max_inline_results]:
+                yt_cache[cand.youtube_id] = (time.monotonic(), cand)
                 duration = format_duration(cand.duration)
                 views = format_views(cand.view_count)
                 results.append(
@@ -501,11 +493,20 @@ async def main() -> None:
             if chosen.query and chosen.query.startswith("yt:"):
                 query_text = chosen.query.split(":", 1)[1].strip()
             query_norm = db.normalize_query(query_text) if query_text else None
+            candidate = None
+            cached = yt_cache.get(youtube_id)
+            if cached:
+                ts, item = cached
+                if time.monotonic() - ts <= yt_cache_ttl:
+                    candidate = item
+                else:
+                    yt_cache.pop(youtube_id, None)
             started = await prep_manager.start_youtube(
                 youtube_id,
                 chosen.from_user.id,
                 query_norm,
                 chosen.inline_message_id,
+                candidate,
             )
             if not started:
                 await bot.send_message(
