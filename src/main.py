@@ -575,7 +575,7 @@ async def main() -> None:
             "Для загрузки своего видео пришлите ссылку формата "
             "`https://www.youtube.com/watch?v=dQw4w9WgXcQ` "
             "`https://www.tiktok.com/@vid_robot/video/1234567890123456789` "
-            "Видео должно быть короче *60 секунд.*"
+            "\nВидео должно быть короче *60 секунд.*"
         )
         sent = await message.answer(
             prompt,
@@ -626,7 +626,7 @@ async def main() -> None:
                 "Для загрузки своего видео пришлите ссылку формата "
                 "`https://www.youtube.com/watch?v=dQw4w9WgXcQ` "
                 "`https://www.tiktok.com/@vid_robot/video/1234567890123456789` "
-                "Видео должно быть короче *60 секунд.*"
+                "\nВидео должно быть короче *60 секунд.*"
             )
             sent = await message.answer(
                 prompt,
