@@ -635,7 +635,7 @@ async def main() -> None:
         if not text:
             return
         lowered = text.lower()
-        if lowered in {"help", "помощь"}:
+        if lowered in {"help", "помощь", "🆘помощь"}:
             await message.answer(
                 settings.help_button_text,
                 reply_markup=build_main_keyboard(),
