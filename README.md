@@ -27,6 +27,7 @@ cp .env.example .env
 Далее задайте переменные окружения (минимум `BOT_TOKEN`).
 Для поиска используется Piped API, нужен `PIPED_API_BASE_URL`.
 Текст для кнопки help задается в `HELP_BUTTON`.
+Команда загрузки поддерживает ссылки на YouTube, Instagram Reels и TikTok.
 
 Запуск
 ------

@@ -132,6 +132,53 @@ async def fetch_video_info(video_id: str) -> Optional[YtCandidate]:
     )
 
 
+async def fetch_media_info(url: str) -> Optional[YtCandidate]:
+    args = [
+        "yt-dlp",
+        url,
+        "--skip-download",
+        "--dump-json",
+        "--no-warnings",
+    ]
+    code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(30.0))
+    debug, lines = _debug_enabled()
+    if debug:
+        logger.info("yt-dlp info args=%s code=%s", args, code)
+        if err.strip():
+            logger.info(
+                "yt-dlp info stderr (first %s lines):\n%s",
+                lines,
+                "\n".join(err.splitlines()[:lines]),
+            )
+    if code != 0:
+        raise YtDlpError(err.strip() or "yt-dlp info failed")
+
+    try:
+        payload = json.loads(out.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return None
+
+    title = payload.get("title") or ""
+    if not title:
+        return None
+    duration = _extract_duration(payload)
+    thumbnail = payload.get("thumbnail")
+    webpage_url = payload.get("webpage_url") or payload.get("original_url") or url
+    view_count_value = payload.get("view_count")
+    view_count = int(view_count_value) if isinstance(view_count_value, int) else None
+    media_id = payload.get("id") or ""
+
+    return YtCandidate(
+        youtube_id=media_id,
+        title=title,
+        duration=duration,
+        view_count=view_count,
+        thumbnail_url=thumbnail if isinstance(thumbnail, str) else None,
+        source_url=webpage_url,
+        rank=1,
+    )
+
+
 def _extract_duration(payload: dict) -> Optional[int]:
     duration_value = payload.get("duration")
     if isinstance(duration_value, (int, float)):
@@ -189,6 +236,7 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
         "best[height<=720]",
         "best[height<=480]",
         "best[height<=360]",
+        "best",
     ]
 
     output_template = str(output_dir / f"{job_id}.%(ext)s")

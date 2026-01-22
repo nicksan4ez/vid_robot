@@ -31,7 +31,7 @@ from .db import Database, YtCandidate
 from .utils import format_duration
 from .piped import PipedClient, PipedError
 from .youtube import YtDlpError, download as yt_download
-from .youtube import fetch_video_info
+from .youtube import fetch_media_info, fetch_video_info
 
 
 logger = logging.getLogger("vid_robot")
@@ -74,8 +74,11 @@ class PrepManager:
         query_norm: str | None,
         inline_message_id: str | None,
         candidate: YtCandidate | None,
+        source_url: str | None,
+        status_message_id: int | None = None,
+        status_keywords: str | None = None,
     ) -> bool:
-        key = f"{chat_id}:{youtube_id}"
+        key = f"{chat_id}:{source_url or youtube_id}"
         async with self._lock:
             if key in self._in_progress:
                 return False
@@ -87,6 +90,9 @@ class PrepManager:
                 query_norm,
                 inline_message_id,
                 candidate,
+                source_url,
+                status_message_id,
+                status_keywords,
                 key,
             )
         )
@@ -99,6 +105,9 @@ class PrepManager:
         query_norm: str | None,
         inline_message_id: str | None,
         candidate: YtCandidate | None,
+        source_url: str | None,
+        status_message_id: int | None,
+        status_keywords: str | None,
         key: str,
     ) -> None:
         async with self._semaphore:
@@ -109,6 +118,9 @@ class PrepManager:
                     query_norm,
                     inline_message_id,
                     candidate,
+                    source_url,
+                    status_message_id,
+                    status_keywords,
                 )
             except Exception:
                 logger.exception("Preparation failed for youtube_id=%s", youtube_id)
@@ -127,6 +139,9 @@ class PrepManager:
         query_norm: str | None,
         inline_message_id: str | None,
         candidate: YtCandidate | None,
+        source_url: str | None,
+        status_message_id: int | None,
+        status_keywords: str | None,
     ) -> None:
         duration = candidate.duration if candidate else None
         if duration is not None and duration > 60:
@@ -137,10 +152,11 @@ class PrepManager:
             return
         # Do not send extra status messages; user already sees the inline placeholder.
 
-        job_id = f"yt-{youtube_id}"
+        job_id = f"yt-{youtube_id or 'media'}"
+        download_url = source_url or f"https://www.youtube.com/watch?v={youtube_id}"
         try:
             result = await yt_download(
-                f"https://www.youtube.com/watch?v={youtube_id}",
+                download_url,
                 self._download_dir,
                 job_id,
             )
@@ -153,6 +169,20 @@ class PrepManager:
             else:
                 await self._bot.send_message(chat_id, f"Не удалось скачать видео: {exc}")
             return
+
+        title = candidate.title if candidate else "Видео"
+        thumb_url = candidate.thumbnail_url if candidate else None
+        if status_message_id and status_keywords is not None:
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=status_message_id,
+                    text=f"Видео \"{title}\" загружено, ключевые слова: `{status_keywords}`",
+                    parse_mode="Markdown",
+                    reply_markup=build_upload_cancel_keyboard(),
+                )
+            except TelegramBadRequest:
+                pass
 
         caption = None
         try:
@@ -177,13 +207,12 @@ class PrepManager:
             return
 
         video = upload_message.video
-        title = candidate.title if candidate else "Видео"
-        thumb_url = candidate.thumbnail_url if candidate else None
+        stored_id = youtube_id or (candidate.youtube_id if candidate else "")
         video_id = await self._db.create_video(
             file_id=video.file_id,
             file_unique_id=video.file_unique_id,
-            youtube_id=youtube_id,
-            source_url=f"https://www.youtube.com/watch?v={youtube_id}",
+            youtube_id=stored_id,
+            source_url=download_url,
             title=title,
             duration=video.duration,
             width=video.width,
@@ -303,6 +332,13 @@ def extract_youtube_id(text: str) -> str | None:
     if not match:
         return None
     return match.group(1)
+
+
+def extract_first_url(text: str) -> str | None:
+    match = re.search(r"https?://\S+", text)
+    if not match:
+        return None
+    return match.group(0).rstrip(").,]>")
 
 
 async def main() -> None:
@@ -496,9 +532,10 @@ async def main() -> None:
     async def start_handler(message: Message, command: CommandObject) -> None:
         if not command.args:
             await message.answer(
-                "Привет! Используйте inline-режим: @vid_robot <запрос>\n"
+                "Привет! Используйте inline-режим: `@vid_robot` _запрос_\n"
                 "Для подготовки видео нажмите кнопку «Найти и подготовить».",
                 reply_markup=build_main_keyboard(),
+                parse_mode="Markdown",
             )
             return
 
@@ -536,12 +573,14 @@ async def main() -> None:
     async def upload_handler(message: Message) -> None:
         prompt = (
             "Для загрузки своего видео пришлите ссылку формата "
-            "(https://www.youtube.com/watch?v=dQw4w9WgXcQ). "
-            "Видео должно быть короче 60 секунд."
+            "`https://www.youtube.com/watch?v=dQw4w9WgXcQ` "
+            "`https://www.tiktok.com/@vid_robot/video/1234567890123456789` "
+            "Видео должно быть короче *60 секунд.*"
         )
         sent = await message.answer(
             prompt,
             reply_markup=build_upload_cancel_keyboard(),
+            parse_mode="Markdown",
         )
         upload_state[message.chat.id] = {
             "stage": "await_link",
@@ -585,13 +624,15 @@ async def main() -> None:
         if lowered in {"upload", "загрузить свое", "загрузить своё"}:
             prompt = (
                 "Для загрузки своего видео пришлите ссылку формата "
-                "(https://www.youtube.com/watch?v=dQw4w9WgXcQ). "
-                "Видео должно быть короче 60 секунд."
+                "`https://www.youtube.com/watch?v=dQw4w9WgXcQ` "
+                "`https://www.tiktok.com/@vid_robot/video/1234567890123456789` "
+                "Видео должно быть короче *60 секунд.*"
             )
             sent = await message.answer(
                 prompt,
                 reply_markup=build_upload_cancel_keyboard(),
                 disable_web_page_preview=True,
+                parse_mode="Markdown",
             )
             upload_state[message.chat.id] = {
                 "stage": "await_link",
@@ -602,8 +643,9 @@ async def main() -> None:
         state = upload_state.get(message.chat.id)
         if state:
             if state["stage"] == "await_link":
-                youtube_id = extract_youtube_id(text)
-                if not youtube_id:
+                raw_url = extract_first_url(text)
+                youtube_id = extract_youtube_id(text) if raw_url else None
+                if not raw_url:
                     try:
                         await bot.edit_message_text(
                             chat_id=message.chat.id,
@@ -623,12 +665,15 @@ async def main() -> None:
                             disable_web_page_preview=True,
                         )
                     return
+                source_url = raw_url
+                if youtube_id:
+                    source_url = f"https://www.youtube.com/watch?v={youtube_id}"
                 await _safe_delete_message(message.chat.id, message.message_id)
                 try:
                     await bot.edit_message_text(
                         chat_id=message.chat.id,
                         message_id=state["message_id"],
-                        text=f"Проверю ваше видео:\n{message.text.strip()}",
+                        text=f"Проверю ваше видео:\n{source_url}",
                         reply_markup=build_upload_cancel_keyboard(),
                         disable_web_page_preview=True,
                     )
@@ -636,7 +681,7 @@ async def main() -> None:
                     pass
                 info = None
                 try:
-                    info = await fetch_video_info(youtube_id)
+                    info = await fetch_media_info(source_url)
                 except YtDlpError as exc:
                     logger.warning("yt-dlp info failed for %s: %s", youtube_id, exc)
                 if info is None or info.duration is None:
@@ -674,7 +719,8 @@ async def main() -> None:
                 upload_state[message.chat.id] = {
                     "stage": "await_keywords",
                     "message_id": state["message_id"],
-                    "youtube_id": youtube_id,
+                    "youtube_id": youtube_id or info.youtube_id or "",
+                    "source_url": source_url,
                     "candidate": info,
                 }
                 try:
@@ -703,17 +749,21 @@ async def main() -> None:
                         message_id=state["message_id"],
                         text=(
                             f"Видео \"{state['candidate'].title}\" загружено, "
-                            f"ключевые слова: <code>{keywords}</code>"
+                            f"ключевые слова: `{keywords}`\n\n"
+                            f"*Подожди немного ⏳*"
                         ),
                         reply_markup=build_upload_cancel_keyboard(),
-                        parse_mode="HTML",
+                        parse_mode="Markdown",
                     )
                 except TelegramBadRequest:
                     await message.answer(
-                        f"Видео \"{state['candidate'].title}\" загружено, "
-                        f"ключевые слова: <code>{keywords}</code>",
+                        (
+                            f"Видео \"{state['candidate'].title}\" загружено, "
+                            f"ключевые слова: `{keywords}`\n\n"
+                            f"*Подожди немного ⏳*"
+                        ),
                         reply_markup=build_upload_cancel_keyboard(),
-                        parse_mode="HTML",
+                        parse_mode="Markdown",
                     )
                 started = await prep_manager.start_youtube(
                     state["youtube_id"],
@@ -721,6 +771,9 @@ async def main() -> None:
                     query_norm,
                     None,
                     state.get("candidate"),
+                    state.get("source_url"),
+                    status_message_id=state["message_id"],
+                    status_keywords=keywords,
                 )
                 if not started:
                     try:
@@ -768,6 +821,7 @@ async def main() -> None:
                 query_norm,
                 chosen.inline_message_id,
                 candidate,
+                candidate.source_url if candidate else None,
             )
             if not started:
                 await bot.send_message(
