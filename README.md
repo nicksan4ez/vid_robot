@@ -95,6 +95,7 @@ docker compose down
 - `DOWNLOAD_DIR` — временная папка для скачивания
 - `MAX_INLINE_RESULTS` — лимит inline‑выдачи (готовые + YouTube)
 - `POPULAR_INLINE_RESULTS` — размер списка “Готовое” без запроса
+- `VID_ROBOT_EMPTY_TOTAL` — общий лимит выдачи при пустом запросе (`@vid_robot`)
 - `YT_INLINE_RESULTS` — не используется (оставлено для совместимости)
 - `MAX_CONCURRENT_JOBS` — максимальное число одновременных подготовок
 - `PM_TOKEN_TTL_SECONDS` — TTL токенов перехода в личку

@@ -27,6 +27,7 @@ class Settings:
     download_dir: Path
     max_inline_results: int
     popular_inline_results: int
+    empty_inline_total: int
     yt_inline_results: int
     max_concurrent_jobs: int
     pm_token_ttl_seconds: int
@@ -52,6 +53,7 @@ def load_settings() -> Settings:
         download_dir=download_dir,
         max_inline_results=_get_int("MAX_INLINE_RESULTS", 10),
         popular_inline_results=_get_int("POPULAR_INLINE_RESULTS", 20),
+        empty_inline_total=_get_int("VID_ROBOT_EMPTY_TOTAL", 50),
         yt_inline_results=_get_int("YT_INLINE_RESULTS", 10),
         max_concurrent_jobs=_get_int("MAX_CONCURRENT_JOBS", 2),
         pm_token_ttl_seconds=_get_int("PM_TOKEN_TTL_SECONDS", 3600),

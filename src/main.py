@@ -389,35 +389,48 @@ async def main() -> None:
     async def inline_query_handler(inline_query: InlineQuery) -> None:
         query = (inline_query.query or "").strip()
         if not query:
+            total_limit = settings.empty_inline_total
+            page_size = min(settings.popular_inline_results, 10)
+            try:
+                offset = int(inline_query.offset or 0)
+            except ValueError:
+                offset = 0
+            offset = max(0, offset)
+
             user_id = inline_query.from_user.id
-            personal = await db.get_user_top_videos(user_id, settings.popular_inline_results)
+            personal = await db.get_user_top_videos(user_id, total_limit)
             personal_ids = {int(item["id"]) for item in personal}
-            remaining = settings.popular_inline_results - len(personal)
+            remaining = total_limit - len(personal)
             popular = []
             if remaining > 0:
                 popular = await db.get_popular_videos(remaining, exclude_ids=personal_ids)
-            results = []
+
+            combined: list[tuple[dict, str]] = []
             for item in personal:
-                results.append(
-                    InlineQueryResultCachedVideo(
-                        id=f"vid:{item['id']}",
-                        video_file_id=item["file_id"],
-                        title=item.get("title") or "Видео",
-                        description="Часто используемое",
-                        thumbnail_url=item.get("thumb_url"),
-                    )
-                )
+                combined.append((item, "Часто используемое"))
             for item in popular:
-                results.append(
-                    InlineQueryResultCachedVideo(
-                        id=f"vid:{item['id']}",
-                        video_file_id=item["file_id"],
-                        title=item.get("title") or "Видео",
-                        description="Популярное",
-                        thumbnail_url=item.get("thumb_url"),
-                    )
+                combined.append((item, "Популярное"))
+
+            page = combined[offset : offset + page_size]
+            results = [
+                InlineQueryResultCachedVideo(
+                    id=f"vid:{item['id']}",
+                    video_file_id=item["file_id"],
+                    title=item.get("title") or "Видео",
+                    description=label,
+                    thumbnail_url=item.get("thumb_url"),
                 )
-            await inline_query.answer(results, is_personal=True, cache_time=1)
+                for item, label in page
+            ]
+            next_offset = ""
+            if offset + page_size < len(combined):
+                next_offset = str(offset + page_size)
+            await inline_query.answer(
+                results,
+                is_personal=True,
+                cache_time=1,
+                next_offset=next_offset,
+            )
             return
 
         if query.startswith("ready:"):
@@ -646,6 +659,8 @@ async def main() -> None:
             return
         text = message.text.strip()
         if not text:
+            return
+        if text.startswith("⏳ Готовлю видео"):
             return
         lowered = text.lower()
         if lowered in {"help", "помощь", "🆘помощь"}:
