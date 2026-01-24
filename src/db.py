@@ -293,16 +293,17 @@ class Database:
 
     async def find_cached_videos(self, query_norm: str, limit: int) -> list[dict]:
         assert self._conn is not None
+        like_value = f"%{query_norm}%"
         cursor = await self._conn.execute(
             """
             SELECT v.id, v.file_id, v.title, v.thumb_url
             FROM videos v
             JOIN video_queries q ON q.video_id = v.id
-            WHERE q.query_norm = ? AND v.file_id IS NOT NULL
+            WHERE q.query_norm LIKE ? AND v.file_id IS NOT NULL
             ORDER BY q.created_at DESC
             LIMIT ?
             """,
-            (query_norm, limit),
+            (like_value, limit),
         )
         rows = await cursor.fetchall()
         await cursor.close()
