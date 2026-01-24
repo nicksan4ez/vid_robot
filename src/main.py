@@ -184,13 +184,17 @@ class PrepManager:
             except TelegramBadRequest:
                 pass
 
-        caption = None
+        caption = (
+            "✅ Готово! Отправь видео обратно в чат, нажав на кнопку 💬 "
+            "или добавь к видео свои теги ⌨️ (ключевые слова) для более удобного поиска"
+        )
         try:
             upload_message = await self._bot.send_video(
                 chat_id,
                 FSInputFile(result.file_path),
                 caption=caption,
                 disable_notification=True,
+                parse_mode="Markdown",
             )
         finally:
             try:
@@ -223,16 +227,7 @@ class PrepManager:
         if query_norm:
             await self._db.link_query_to_video(query_norm, video_id)
 
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📤 Отправить обратно в чат…",
-                        switch_inline_query=f"ready:{video_id}",
-                    )
-                ]
-            ]
-        )
+        keyboard = build_video_ready_keyboard(video_id)
 
         if inline_message_id:
             try:
@@ -241,6 +236,7 @@ class PrepManager:
                     media=InputMediaVideo(
                         media=video.file_id,
                         caption=caption,
+                        parse_mode="Markdown",
                     ),
                 )
                 await self._bot.edit_message_reply_markup(
@@ -328,6 +324,23 @@ def build_upload_cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def build_video_ready_keyboard(video_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Отправить в чат..",
+                    switch_inline_query=f"ready:{video_id}",
+                ),
+                InlineKeyboardButton(
+                    text="⌨️ Добавить теги",
+                    callback_data=f"addtags:{video_id}",
+                ),
+            ]
+        ]
+    )
+
+
 def build_inline_search_button() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -384,6 +397,7 @@ async def main() -> None:
     yt_cache: dict[str, tuple[float, YtCandidate]] = {}
     yt_cache_ttl = 600.0
     upload_state: dict[int, dict] = {}
+    tag_state: dict[int, dict] = {}
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -647,6 +661,43 @@ async def main() -> None:
             await callback.message.answer("Отменено.")
         await callback.answer()
 
+    @dp.callback_query(F.data.startswith("addtags:"))
+    async def add_tags_handler(callback: CallbackQuery) -> None:
+        raw_id = callback.data.split(":", 1)[1]
+        if not raw_id.isdigit():
+            await callback.answer()
+            return
+        user_id = callback.from_user.id
+        if callback.message is not None:
+            chat_id = callback.message.chat.id
+            message_id = callback.message.message_id
+            tag_state[user_id] = {"video_id": int(raw_id), "chat_id": chat_id, "message_id": message_id}
+            try:
+                await bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    caption="⌨️ Напиши ключевые слова, чтобы легко найти это видео, к примеру: `кот хакер`",
+                    parse_mode="Markdown",
+                    reply_markup=callback.message.reply_markup,
+                )
+            except TelegramBadRequest:
+                pass
+        elif callback.inline_message_id:
+            tag_state[user_id] = {
+                "video_id": int(raw_id),
+                "inline_message_id": callback.inline_message_id,
+            }
+            try:
+                await bot.edit_message_caption(
+                    inline_message_id=callback.inline_message_id,
+                    caption="⌨️ Напиши ключевые слова, чтобы легко найти это видео, к примеру: `кот хакер`",
+                    parse_mode="Markdown",
+                    reply_markup=build_video_ready_keyboard(int(raw_id)),
+                )
+            except TelegramBadRequest:
+                pass
+        await callback.answer()
+
     async def _safe_delete_message(chat_id: int, message_id: int) -> None:
         try:
             await bot.delete_message(chat_id, message_id)
@@ -661,6 +712,35 @@ async def main() -> None:
         if not text:
             return
         if text.startswith("⏳ Готовлю видео"):
+            return
+        tag_info = tag_state.get(message.from_user.id)
+        if tag_info:
+            tags = text.strip()
+            if not tags:
+                return
+            await _safe_delete_message(message.chat.id, message.message_id)
+            await db.link_query_to_video(db.normalize_query(tags), tag_info["video_id"])
+            try:
+                if "inline_message_id" in tag_info:
+                    await bot.edit_message_caption(
+                        inline_message_id=tag_info["inline_message_id"],
+                        caption="✅ Готово! Отправь видео обратно в чат, нажав на кнопку 💬 "
+                        "или добавь к видео свои теги ⌨️ (ключевые слова) для более удобного поиска",
+                        parse_mode="Markdown",
+                        reply_markup=build_video_ready_keyboard(tag_info["video_id"]),
+                    )
+                else:
+                    await bot.edit_message_caption(
+                        chat_id=tag_info["chat_id"],
+                        message_id=tag_info["message_id"],
+                        caption="✅ Готово! Отправь видео обратно в чат, нажав на кнопку 💬 "
+                        "или добавь к видео свои теги ⌨️ (ключевые слова) для более удобного поиска",
+                        parse_mode="Markdown",
+                        reply_markup=build_video_ready_keyboard(tag_info["video_id"]),
+                    )
+            except TelegramBadRequest:
+                pass
+            tag_state.pop(message.from_user.id, None)
             return
         lowered = text.lower()
         if lowered in {"help", "помощь", "🆘помощь"}:
