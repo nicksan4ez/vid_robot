@@ -420,10 +420,19 @@ async def main() -> None:
                 popular = await db.get_popular_videos(remaining, exclude_ids=personal_ids)
 
             combined: list[tuple[dict, str]] = []
+            seen_ids: set[int] = set()
             for item in personal:
+                vid = int(item["id"])
+                if vid in seen_ids:
+                    continue
                 combined.append((item, "Часто используемое"))
+                seen_ids.add(vid)
             for item in popular:
+                vid = int(item["id"])
+                if vid in seen_ids:
+                    continue
                 combined.append((item, "Популярное"))
+                seen_ids.add(vid)
 
             page = combined[offset : offset + page_size]
             results = [
@@ -559,7 +568,12 @@ async def main() -> None:
             for item in cached_items:
                 if int(item["id"]) not in personal_ids:
                     ordered_items.append(item)
+            seen_ids: set[int] = set()
             for item in ordered_items:
+                vid = int(item["id"])
+                if vid in seen_ids:
+                    continue
+                seen_ids.add(vid)
                 is_personal = int(item["id"]) in personal_ids
                 results.append(
                     InlineQueryResultCachedVideo(
