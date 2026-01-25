@@ -46,7 +46,13 @@ def _common_yt_dlp_args() -> list[str]:
     args: list[str] = []
     cookies_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
     if cookies_file:
-        args.extend(["--cookies", cookies_file])
+        cookie_path = Path(cookies_file)
+        if not cookie_path.is_absolute():
+            cookie_path = (Path.cwd() / cookie_path).resolve()
+        if cookie_path.exists():
+            args.extend(["--cookies", str(cookie_path)])
+        else:
+            logger.warning("YTDLP_COOKIES_FILE not found: %s", cookie_path)
     extractor_args = os.getenv("YTDLP_EXTRACTOR_ARGS", "").strip()
     if extractor_args:
         args.extend(["--extractor-args", extractor_args])
@@ -281,9 +287,9 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
         code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(120.0))
         if code == 0:
             path = _find_downloaded_file(output_dir, job_id)
-            if path is not None and path.exists():
+            if path is not None and path.exists() and path.stat().st_size > 0:
                 return DownloadResult(file_path=path)
-            last_error = "download finished but file is missing"
+            last_error = "download finished but file is missing or empty"
         else:
             last_error = err.strip() or out.strip() or "yt-dlp download failed"
 

@@ -107,6 +107,11 @@ docker compose down
 - `YTDLP_SOCKET_TIMEOUT` — socket timeout `yt-dlp`
 - `YTDLP_COOKIES_FILE` — путь к cookies для `yt-dlp` (если нужны)
 - `YTDLP_EXTRACTOR_ARGS` — дополнительные extractor-args (`youtube:...`)
+
+Важно про cookies
+-----------------
+- Указывай **абсолютный путь** к файлу cookies.
+- В Docker нужно смонтировать файл в контейнер и указать путь внутри контейнера.
 - `YTDLP_DEBUG` / `YTDLP_DEBUG_LINES` — отладка `yt-dlp`
 
 Хранилище
