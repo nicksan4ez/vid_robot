@@ -51,6 +51,7 @@ def _common_yt_dlp_args() -> list[str]:
             cookie_path = (Path.cwd() / cookie_path).resolve()
         if cookie_path.exists():
             args.extend(["--cookies", str(cookie_path)])
+            args.append("--no-write-cookies")
         else:
             logger.warning("YTDLP_COOKIES_FILE not found: %s", cookie_path)
     extractor_args = os.getenv("YTDLP_EXTRACTOR_ARGS", "").strip()
