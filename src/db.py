@@ -62,6 +62,7 @@ class Database:
                 size INTEGER,
                 thumb_url TEXT,
                 use_count INTEGER NOT NULL DEFAULT 0,
+                blocked INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             );
 
@@ -111,6 +112,16 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_user_video_stats_user
                 ON user_video_stats(user_id, use_count DESC, last_used_at DESC);
+
+            CREATE TABLE IF NOT EXISTS complaints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reporter_id INTEGER NOT NULL,
+                video_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
+            );
             """
         )
         await self._ensure_columns()
@@ -130,6 +141,10 @@ class Database:
         if "use_count" not in columns:
             await self._conn.execute(
                 "ALTER TABLE videos ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "blocked" not in columns:
+            await self._conn.execute(
+                "ALTER TABLE videos ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0"
             )
 
     async def _ensure_candidate_columns(self) -> None:
@@ -299,7 +314,7 @@ class Database:
             SELECT v.id, v.file_id, v.title, v.thumb_url
             FROM videos v
             JOIN video_queries q ON q.video_id = v.id
-            WHERE q.query_norm LIKE ? AND v.file_id IS NOT NULL
+            WHERE q.query_norm LIKE ? AND v.file_id IS NOT NULL AND v.blocked = 0
             ORDER BY q.created_at DESC
             LIMIT ?
             """,
@@ -321,7 +336,7 @@ class Database:
             sql = (
                 "SELECT id, file_id, title, thumb_url "
                 "FROM videos "
-                "WHERE file_id IS NOT NULL AND lower(title) LIKE ? "
+                "WHERE file_id IS NOT NULL AND blocked = 0 AND lower(title) LIKE ? "
                 f"AND id NOT IN ({placeholders}) "
                 "ORDER BY use_count DESC, created_at DESC "
                 "LIMIT ?"
@@ -331,7 +346,7 @@ class Database:
             sql = (
                 "SELECT id, file_id, title, thumb_url "
                 "FROM videos "
-                "WHERE file_id IS NOT NULL AND lower(title) LIKE ? "
+                "WHERE file_id IS NOT NULL AND blocked = 0 AND lower(title) LIKE ? "
                 "ORDER BY use_count DESC, created_at DESC "
                 "LIMIT ?"
             )
@@ -350,7 +365,7 @@ class Database:
             sql = (
                 "SELECT id, file_id, title, thumb_url "
                 "FROM videos "
-                "WHERE file_id IS NOT NULL AND id NOT IN ("
+                "WHERE file_id IS NOT NULL AND blocked = 0 AND id NOT IN ("
                 f"{placeholders}"
                 ") "
                 "ORDER BY use_count DESC, created_at DESC "
@@ -361,7 +376,7 @@ class Database:
             sql = (
                 "SELECT id, file_id, title, thumb_url "
                 "FROM videos "
-                "WHERE file_id IS NOT NULL "
+                "WHERE file_id IS NOT NULL AND blocked = 0 "
                 "ORDER BY use_count DESC, created_at DESC "
                 "LIMIT ?"
             )
@@ -400,7 +415,7 @@ class Database:
             SELECT v.id, v.file_id, v.title, v.thumb_url
             FROM user_video_stats s
             JOIN videos v ON v.id = s.video_id
-            WHERE s.user_id = ? AND v.file_id IS NOT NULL
+            WHERE s.user_id = ? AND v.file_id IS NOT NULL AND v.blocked = 0
             ORDER BY s.use_count DESC, s.last_used_at DESC
             LIMIT ?
             """,
@@ -435,7 +450,7 @@ class Database:
         assert self._conn is not None
         cursor = await self._conn.execute(
             """
-            SELECT id, file_id, title, thumb_url
+            SELECT id, file_id, title, thumb_url, source_url, blocked
             FROM videos
             WHERE id = ?
             """,
@@ -446,3 +461,61 @@ class Database:
         if row is None:
             return None
         return dict(row)
+
+    async def set_video_blocked(self, video_id: int, blocked: bool = True) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            "UPDATE videos SET blocked = ? WHERE id = ?",
+            (1 if blocked else 0, video_id),
+        )
+        await self._conn.commit()
+
+    async def is_video_blocked_by_source(self, youtube_id: str, source_url: str) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT 1
+            FROM videos
+            WHERE blocked = 1 AND (youtube_id = ? OR source_url = ?)
+            LIMIT 1
+            """,
+            (youtube_id, source_url),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row is not None
+
+    async def create_complaint(self, reporter_id: int, video_id: int, reason: str) -> int:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO complaints (reporter_id, video_id, reason, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (reporter_id, video_id, reason, "pending", now_ts),
+        )
+        await self._conn.commit()
+        return int(cursor.lastrowid)
+
+    async def get_complaint(self, complaint_id: int) -> Optional[dict]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT id, reporter_id, video_id, reason, status
+            FROM complaints
+            WHERE id = ?
+            """,
+            (complaint_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return dict(row) if row else None
+
+    async def update_complaint_status(self, complaint_id: int, status: str) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            "UPDATE complaints SET status = ? WHERE id = ?",
+            (status, complaint_id),
+        )
+        await self._conn.commit()

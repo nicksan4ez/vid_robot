@@ -32,6 +32,7 @@ class Settings:
     max_concurrent_jobs: int
     pm_token_ttl_seconds: int
     help_button_text: str
+    admin_id: int
     piped_api_base_url: str
     piped_timeout_seconds: float
 
@@ -64,6 +65,7 @@ def load_settings() -> Settings:
             "После `@vid_robot` можно писать ключевые слова для поиска видео. Если по введенным словам нет видео - "
             "нажмите на кнопку выше `Найти и подготовить 🎬`, выберите из списка нужное видео.",
         ),
+        admin_id=_get_int("ADMIN_ID", 0),
         piped_api_base_url=piped_base,
         piped_timeout_seconds=_get_float("PIPED_TIMEOUT_SECONDS", 4.0),
     )

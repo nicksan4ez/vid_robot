@@ -150,6 +150,12 @@ class PrepManager:
                 "Видео длиннее 1 минуты, выбери другое.",
             )
             return
+        if await self._db.is_video_blocked_by_source(youtube_id, download_url):
+            await self._bot.send_message(
+                chat_id,
+                "Это видео заблокированно администратором, выберите другое",
+            )
+            return
         # Do not send extra status messages; user already sees the inline placeholder.
 
         job_id = f"yt-{youtube_id or 'media'}"
@@ -271,7 +277,7 @@ class PrepManager:
 
 
 def build_switch_pm_text() -> str:
-    return "Найти и подготовить 🎬 ≈ 10 сек"
+    return "Сделать свой видеостикер🎬 ≈ 10 сек"
 
 
 def format_views(value: int | None) -> str:
@@ -304,6 +310,7 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🆘Помощь"),
                 KeyboardButton(text="🔍 Найти"),
                 KeyboardButton(text="⬇️Загрузить свое"),
+                KeyboardButton(text="🚩Пожаловаться"),
             ]
         ],
         resize_keyboard=True,
@@ -341,6 +348,19 @@ def build_video_ready_keyboard(video_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def build_report_pick_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Выбрать видео в @vid_robot",
+                    switch_inline_query_current_chat="",
+                )
+            ]
+        ]
+    )
+
+
 def build_inline_search_button() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -366,6 +386,19 @@ def extract_first_url(text: str) -> str | None:
     if not match:
         return None
     return match.group(0).rstrip(").,]>")
+
+
+def format_user_link(user: object) -> str:
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    username = getattr(user, "username", None)
+    full_name = " ".join(part for part in [first, last] if part).strip() or "Пользователь"
+    if username:
+        return f"{full_name}, @{username}, https://t.me/{username}"
+    user_id = getattr(user, "id", None)
+    if user_id:
+        return f"{full_name}, tg://user?id={user_id}"
+    return full_name
 
 
 async def main() -> None:
@@ -398,6 +431,7 @@ async def main() -> None:
     yt_cache_ttl = 600.0
     upload_state: dict[int, dict] = {}
     tag_state: dict[int, dict] = {}
+    report_state: dict[int, dict] = {}
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -448,11 +482,17 @@ async def main() -> None:
             next_offset = ""
             if offset + page_size < len(combined):
                 next_offset = str(offset + page_size)
+            await db.purge_expired_tokens()
+            token = await db.create_pm_token(query, "", settings.pm_token_ttl_seconds)
+            switch_pm_text = build_switch_pm_text()
+            switch_pm_parameter = f"pm-{token.token}"
             await inline_query.answer(
                 results,
                 is_personal=True,
                 cache_time=1,
                 next_offset=next_offset,
+                switch_pm_text=switch_pm_text,
+                switch_pm_parameter=switch_pm_parameter,
             )
             return
 
@@ -462,7 +502,7 @@ async def main() -> None:
                 await inline_query.answer([], is_personal=True, cache_time=1)
                 return
             video = await db.get_video_by_id(int(raw_id))
-            if video is None or not video.get("file_id"):
+            if video is None or not video.get("file_id") or video.get("blocked"):
                 await inline_query.answer([], is_personal=True, cache_time=1)
                 return
             result = InlineQueryResultCachedVideo(
@@ -663,6 +703,14 @@ async def main() -> None:
             "message_id": sent.message_id,
         }
 
+    @dp.message(Command("report"))
+    async def report_handler(message: Message) -> None:
+        report_state[message.from_user.id] = {"stage": "await_video"}
+        await message.answer(
+            "Выберите видео, на которое хотите пожаловаться:",
+            reply_markup=build_report_pick_keyboard(),
+        )
+
     @dp.callback_query(F.data == "upload_cancel")
     async def upload_cancel_handler(callback: CallbackQuery) -> None:
         if callback.message is None:
@@ -712,6 +760,45 @@ async def main() -> None:
                 pass
         await callback.answer()
 
+    @dp.callback_query(F.data.startswith("complaint:"))
+    async def complaint_admin_handler(callback: CallbackQuery) -> None:
+        parts = callback.data.split(":", 2)
+        if len(parts) != 3:
+            await callback.answer()
+            return
+        action = parts[1]
+        if callback.from_user.id != settings.admin_id:
+            await callback.answer()
+            return
+        if not parts[2].isdigit():
+            await callback.answer()
+            return
+        complaint_id = int(parts[2])
+        complaint = await db.get_complaint(complaint_id)
+        if complaint is None or complaint.get("status") != "pending":
+            await callback.answer()
+            return
+        reporter_id = int(complaint["reporter_id"])
+        video_id = int(complaint["video_id"])
+        if action == "block":
+            await db.set_video_blocked(video_id, True)
+            await db.update_complaint_status(complaint_id, "blocked")
+            await bot.send_message(
+                reporter_id,
+                "Ваша жалоба рассмотрена и удовлетворена. Видео заблокировано. Спасибо 🤝",
+            )
+        elif action == "skip":
+            await db.update_complaint_status(complaint_id, "skipped")
+            await bot.send_message(
+                reporter_id,
+                "Ваша жалоба рассмотрена и НЕ удовлетворена. Спасибо 🤝",
+            )
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await callback.answer()
+
     async def _safe_delete_message(chat_id: int, message_id: int) -> None:
         try:
             await bot.delete_message(chat_id, message_id)
@@ -756,6 +843,52 @@ async def main() -> None:
                 pass
             tag_state.pop(message.from_user.id, None)
             return
+        report_info = report_state.get(message.from_user.id)
+        if report_info and report_info.get("stage") == "await_reason":
+            reason = text.strip()
+            if not reason:
+                return
+            await _safe_delete_message(message.chat.id, message.message_id)
+            complaint_id = await db.create_complaint(
+                message.from_user.id, report_info["video_id"], reason
+            )
+            await message.answer("Жалоба отправлена на рассмотрение")
+            video = await db.get_video_by_id(report_info["video_id"])
+            if video and settings.admin_id:
+                reporter = format_user_link(message.from_user)
+                title = video.get("title") or "Видео"
+                source_url = video.get("source_url") or "—"
+                text_block = (
+                    f"Поступила жалоба от {reporter} на видео \"{title}\" ({source_url})\n"
+                    f"Прямая ссылка на видео: `@vid_robot ready:{video['id']}`\n"
+                    f"Причина: \"{reason}\""
+                )
+                await bot.send_message(
+                    settings.admin_id,
+                    text_block,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+                await bot.send_video(
+                    settings.admin_id,
+                    video["file_id"],
+                    reply_markup=InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="🚫Заблокировать",
+                                    callback_data=f"complaint:block:{complaint_id}",
+                                ),
+                                InlineKeyboardButton(
+                                    text="💤Пропустить",
+                                    callback_data=f"complaint:skip:{complaint_id}",
+                                ),
+                            ]
+                        ]
+                    ),
+                )
+            report_state.pop(message.from_user.id, None)
+            return
         lowered = text.lower()
         if lowered in {"help", "помощь", "🆘помощь"}:
             await message.answer(
@@ -763,6 +896,13 @@ async def main() -> None:
                 reply_markup=build_main_keyboard(),
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
+            )
+            return
+        if lowered in {"/report", "report", "жалоба", "пожаловаться"}:
+            report_state[message.from_user.id] = {"stage": "await_video"}
+            await message.answer(
+                "Выберите видео, на которое хотите пожаловаться:",
+                reply_markup=build_report_pick_keyboard(),
             )
             return
         if lowered in {"🔍 найти", "найти"}:
@@ -953,6 +1093,17 @@ async def main() -> None:
             raw_id = result_id.split(":", 1)[1]
             if raw_id.isdigit():
                 video_id = int(raw_id)
+                report_info = report_state.get(chosen.from_user.id)
+                if report_info and report_info.get("stage") == "await_video":
+                    report_state[chosen.from_user.id] = {
+                        "stage": "await_reason",
+                        "video_id": video_id,
+                    }
+                    await bot.send_message(
+                        chosen.from_user.id,
+                        "📝 Напишите причину жалобы на это видео.",
+                    )
+                    return
                 await db.increment_usage(video_id)
                 await db.upsert_user_video_stat(chosen.from_user.id, video_id)
             return
