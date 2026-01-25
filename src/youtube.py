@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,14 +45,26 @@ def _get_timeout(default: float) -> float:
 
 def _common_yt_dlp_args() -> list[str]:
     args: list[str] = []
+    js_runtimes = os.getenv("YTDLP_JS_RUNTIMES", "").strip()
+    if js_runtimes:
+        args.extend(["--js-runtimes", js_runtimes])
+    remote_components = os.getenv("YTDLP_REMOTE_COMPONENTS", "").strip()
+    if remote_components:
+        args.extend(["--remote-components", remote_components])
     cookies_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
     if cookies_file:
         cookie_path = Path(cookies_file)
         if not cookie_path.is_absolute():
             cookie_path = (Path.cwd() / cookie_path).resolve()
         if cookie_path.exists():
-            args.extend(["--cookies", str(cookie_path)])
-            args.append("--no-write-cookies")
+            tmp_dir = Path(os.getenv("YTDLP_TMP_DIR", "/tmp/vid_robot"))
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_cookie = tmp_dir / "yt_cookies.txt"
+            try:
+                shutil.copyfile(cookie_path, tmp_cookie)
+                args.extend(["--cookies", str(tmp_cookie)])
+            except OSError:
+                args.extend(["--cookies", str(cookie_path)])
         else:
             logger.warning("YTDLP_COOKIES_FILE not found: %s", cookie_path)
     extractor_args = os.getenv("YTDLP_EXTRACTOR_ARGS", "").strip()
