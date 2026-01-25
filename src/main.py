@@ -144,6 +144,7 @@ class PrepManager:
         status_keywords: str | None,
     ) -> None:
         duration = candidate.duration if candidate else None
+        download_url = source_url or f"https://www.youtube.com/watch?v={youtube_id}"
         if duration is not None and duration > 60:
             await self._bot.send_message(
                 chat_id,
@@ -159,7 +160,6 @@ class PrepManager:
         # Do not send extra status messages; user already sees the inline placeholder.
 
         job_id = f"yt-{youtube_id or 'media'}"
-        download_url = source_url or f"https://www.youtube.com/watch?v={youtube_id}"
         try:
             result = await yt_download(
                 download_url,
