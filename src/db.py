@@ -122,6 +122,11 @@ class Database:
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS report_bans (
+                user_id INTEGER PRIMARY KEY,
+                created_at INTEGER NOT NULL
+            );
             """
         )
         await self._ensure_columns()
@@ -517,5 +522,24 @@ class Database:
         await self._conn.execute(
             "UPDATE complaints SET status = ? WHERE id = ?",
             (status, complaint_id),
+        )
+        await self._conn.commit()
+
+    async def is_report_banned(self, user_id: int) -> bool:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT 1 FROM report_bans WHERE user_id = ? LIMIT 1",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row is not None
+
+    async def ban_reporter(self, user_id: int) -> None:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO report_bans (user_id, created_at) VALUES (?, ?)",
+            (user_id, now_ts),
         )
         await self._conn.commit()

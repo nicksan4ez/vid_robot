@@ -436,6 +436,15 @@ async def main() -> None:
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
         query = (inline_query.query or "").strip()
+        if query in {"🚩Пожаловаться", "🚩пожаловаться", "yt:🚩Пожаловаться", "yt:🚩пожаловаться"}:
+            await inline_query.answer(
+                [],
+                is_personal=True,
+                cache_time=1,
+                switch_pm_text="Отправить жалобу",
+                switch_pm_parameter="report",
+            )
+            return
         if not query:
             total_limit = settings.empty_inline_total
             page_size = min(settings.popular_inline_results, 10)
@@ -657,9 +666,16 @@ async def main() -> None:
 
         param = command.args
         if not param.startswith("pm-"):
-            await message.answer(
-                "Неизвестный параметр. Повторите поиск в inline."
-            )
+            if param == "report":
+                report_state[message.from_user.id] = {"stage": "await_video"}
+                await message.answer(
+                    "Выберите видео, на которое хотите пожаловаться:",
+                    reply_markup=build_report_pick_keyboard(),
+                )
+            else:
+                await message.answer(
+                    "Неизвестный параметр. Повторите поиск в inline."
+                )
             return
 
         token = param.split("-", 1)[1]
@@ -785,13 +801,20 @@ async def main() -> None:
             await db.update_complaint_status(complaint_id, "blocked")
             await bot.send_message(
                 reporter_id,
-                "Ваша жалоба рассмотрена и удовлетворена. Видео заблокировано. Спасибо 🤝",
+                "Ваша жалоба рассмотрена. Видео заблокировано. Спасибо 🤝",
             )
         elif action == "skip":
             await db.update_complaint_status(complaint_id, "skipped")
             await bot.send_message(
                 reporter_id,
-                "Ваша жалоба рассмотрена и НЕ удовлетворена. Спасибо 🤝",
+                "Ваша жалоба рассмотрена. Видео НЕ заблокировано. Спасибо 🤝",
+            )
+        elif action == "ban":
+            await db.ban_reporter(reporter_id)
+            await db.update_complaint_status(complaint_id, "banned")
+            await bot.send_message(
+                reporter_id,
+                "Вам запрещено отправлять жалобы",
             )
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
@@ -883,6 +906,10 @@ async def main() -> None:
                                     text="💤Пропустить",
                                     callback_data=f"complaint:skip:{complaint_id}",
                                 ),
+                                InlineKeyboardButton(
+                                    text="Блок. стукача",
+                                    callback_data=f"complaint:ban:{complaint_id}",
+                                ),
                             ]
                         ]
                     ),
@@ -898,7 +925,10 @@ async def main() -> None:
                 disable_web_page_preview=True,
             )
             return
-        if lowered in {"/report", "report", "жалоба", "пожаловаться"}:
+        if lowered in {"/report", "report", "жалоба", "пожаловаться", "🚩пожаловаться"}:
+            if await db.is_report_banned(message.from_user.id):
+                await message.answer("Вам запрещено отправлять жалобы")
+                return
             report_state[message.from_user.id] = {"stage": "await_video"}
             await message.answer(
                 "Выберите видео, на которое хотите пожаловаться:",
@@ -1080,10 +1110,9 @@ async def main() -> None:
 
         if text.startswith("⏳ Готовлю видео"):
             return
-        keyboard = build_inline_search_keyboard(text)
         await message.answer(
-            f"Вот результаты по запросу: {text}",
-            reply_markup=keyboard,
+            "Нажми на кнопки ниже или пришли ссылку",
+            reply_markup=build_main_keyboard(),
         )
 
     @dp.chosen_inline_result()
@@ -1095,6 +1124,13 @@ async def main() -> None:
                 video_id = int(raw_id)
                 report_info = report_state.get(chosen.from_user.id)
                 if report_info and report_info.get("stage") == "await_video":
+                    if await db.is_report_banned(chosen.from_user.id):
+                        await bot.send_message(
+                            chosen.from_user.id,
+                            "Вам запрещено отправлять жалобы",
+                        )
+                        report_state.pop(chosen.from_user.id, None)
+                        return
                     report_state[chosen.from_user.id] = {
                         "stage": "await_reason",
                         "video_id": video_id,
