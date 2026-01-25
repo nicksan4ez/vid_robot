@@ -105,6 +105,8 @@ docker compose down
 - `PIPED_DEBUG` — подробные логи Piped (`1/true`)
 - `YTDLP_TIMEOUT_SECONDS` — таймаут `yt-dlp`
 - `YTDLP_SOCKET_TIMEOUT` — socket timeout `yt-dlp`
+- `YTDLP_COOKIES_FILE` — путь к cookies для `yt-dlp` (если нужны)
+- `YTDLP_EXTRACTOR_ARGS` — дополнительные extractor-args (`youtube:...`)
 - `YTDLP_DEBUG` / `YTDLP_DEBUG_LINES` — отладка `yt-dlp`
 
 Хранилище

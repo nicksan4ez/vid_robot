@@ -42,6 +42,17 @@ def _get_timeout(default: float) -> float:
         return default
 
 
+def _common_yt_dlp_args() -> list[str]:
+    args: list[str] = []
+    cookies_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if cookies_file:
+        args.extend(["--cookies", cookies_file])
+    extractor_args = os.getenv("YTDLP_EXTRACTOR_ARGS", "").strip()
+    if extractor_args:
+        args.extend(["--extractor-args", extractor_args])
+    return args
+
+
 async def _run_yt_dlp(args: list[str], timeout_seconds: float | None = None) -> tuple[int, str, str]:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -83,6 +94,7 @@ async def fetch_video_info(video_id: str) -> Optional[YtCandidate]:
         "--dump-json",
         "--no-warnings",
     ]
+    args.extend(_common_yt_dlp_args())
     if socket_timeout:
         args.extend(["--socket-timeout", socket_timeout])
     start = time.monotonic()
@@ -140,6 +152,7 @@ async def fetch_media_info(url: str) -> Optional[YtCandidate]:
         "--dump-json",
         "--no-warnings",
     ]
+    args.extend(_common_yt_dlp_args())
     code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(30.0))
     debug, lines = _debug_enabled()
     if debug:
@@ -264,6 +277,7 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
             "-o",
             output_template,
         ]
+        args.extend(_common_yt_dlp_args())
         code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(120.0))
         if code == 0:
             path = _find_downloaded_file(output_dir, job_id)
