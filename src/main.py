@@ -401,6 +401,24 @@ def format_user_link(user: object) -> str:
     return full_name
 
 
+def format_user_html(user: object) -> str:
+    import html
+
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    username = getattr(user, "username", None)
+    full_name = " ".join(part for part in [first, last] if part).strip() or "Пользователь"
+    safe_name = html.escape(full_name)
+    if username:
+        safe_username = html.escape(username)
+        profile_url = f"https://t.me/{safe_username}"
+        return f"{safe_name}, @{safe_username}, <a href=\"{profile_url}\">профиль</a>"
+    user_id = getattr(user, "id", None)
+    if user_id:
+        return f"{safe_name}, <a href=\"tg://user?id={user_id}\">профиль</a>"
+    return safe_name
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     load_dotenv()
@@ -878,18 +896,22 @@ async def main() -> None:
             await message.answer("Жалоба отправлена на рассмотрение")
             video = await db.get_video_by_id(report_info["video_id"])
             if video and settings.admin_id:
-                reporter = format_user_link(message.from_user)
-                title = video.get("title") or "Видео"
-                source_url = video.get("source_url") or "—"
+                import html
+
+                reporter = format_user_html(message.from_user)
+                title = html.escape(video.get("title") or "Видео")
+                source_url = html.escape(video.get("source_url") or "—")
+                reason_safe = html.escape(reason)
+                ready_code = html.escape(f"@vid_robot ready:{video['id']}")
                 text_block = (
                     f"Поступила жалоба от {reporter} на видео \"{title}\" ({source_url})\n"
-                    f"Прямая ссылка на видео: `@vid_robot ready:{video['id']}`\n"
-                    f"Причина: \"{reason}\""
+                    f"Прямая ссылка на видео: <code>{ready_code}</code>\n"
+                    f"Причина: \"{reason_safe}\""
                 )
                 await bot.send_message(
                     settings.admin_id,
                     text_block,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
                 await bot.send_video(
