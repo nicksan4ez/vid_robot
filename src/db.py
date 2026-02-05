@@ -61,6 +61,7 @@ class Database:
                 height INTEGER,
                 size INTEGER,
                 thumb_url TEXT,
+                uploader_id INTEGER,
                 use_count INTEGER NOT NULL DEFAULT 0,
                 blocked INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
@@ -150,6 +151,10 @@ class Database:
         if "blocked" not in columns:
             await self._conn.execute(
                 "ALTER TABLE videos ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0"
+            )
+        if "uploader_id" not in columns:
+            await self._conn.execute(
+                "ALTER TABLE videos ADD COLUMN uploader_id INTEGER"
             )
 
     async def _ensure_candidate_columns(self) -> None:
@@ -275,14 +280,15 @@ class Database:
         height: Optional[int],
         size: Optional[int],
         thumb_url: Optional[str],
+        uploader_id: Optional[int] = None,
     ) -> int:
         assert self._conn is not None
         now_ts = int(time.time())
         cursor = await self._conn.execute(
             """
             INSERT INTO videos
-                (file_id, file_unique_id, youtube_id, source_url, title, duration, width, height, size, thumb_url, use_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (file_id, file_unique_id, youtube_id, source_url, title, duration, width, height, size, thumb_url, uploader_id, use_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 file_id,
@@ -295,6 +301,7 @@ class Database:
                 height,
                 size,
                 thumb_url,
+                uploader_id,
                 0,
                 now_ts,
             ),
@@ -455,7 +462,8 @@ class Database:
         assert self._conn is not None
         cursor = await self._conn.execute(
             """
-            SELECT id, file_id, title, thumb_url, source_url, blocked
+            SELECT id, file_id, file_unique_id, title, thumb_url, source_url,
+                   duration, width, height, size, uploader_id, blocked
             FROM videos
             WHERE id = ?
             """,
@@ -466,6 +474,44 @@ class Database:
         if row is None:
             return None
         return dict(row)
+
+    async def update_video_media(
+        self,
+        video_id: int,
+        *,
+        file_id: str,
+        file_unique_id: str,
+        duration: Optional[int],
+        width: Optional[int],
+        height: Optional[int],
+        size: Optional[int],
+        thumb_url: Optional[str],
+    ) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            """
+            UPDATE videos
+            SET file_id = ?,
+                file_unique_id = ?,
+                duration = ?,
+                width = ?,
+                height = ?,
+                size = ?,
+                thumb_url = ?
+            WHERE id = ?
+            """,
+            (
+                file_id,
+                file_unique_id,
+                duration,
+                width,
+                height,
+                size,
+                thumb_url,
+                video_id,
+            ),
+        )
+        await self._conn.commit()
 
     async def set_video_blocked(self, video_id: int, blocked: bool = True) -> None:
         assert self._conn is not None

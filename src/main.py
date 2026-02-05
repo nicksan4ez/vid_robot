@@ -31,6 +31,7 @@ from .db import Database, YtCandidate
 from .utils import format_duration
 from .piped import PipedClient, PipedError
 from .youtube import YtDlpError, download as yt_download
+from .utils import parse_time_range
 from .youtube import fetch_media_info, fetch_video_info
 
 
@@ -229,6 +230,7 @@ class PrepManager:
             height=video.height,
             size=video.file_size,
             thumb_url=thumb_url,
+            uploader_id=chat_id,
         )
         if query_norm:
             await self._db.link_query_to_video(query_norm, video_id)
@@ -307,9 +309,12 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="🆘Помощь"),
                 KeyboardButton(text="🔍 Найти"),
                 KeyboardButton(text="⬇️Загрузить свое"),
+                KeyboardButton(text="✂️ Обрезать"),
+            ],
+            [
+                KeyboardButton(text="🆘Помощь"),
                 KeyboardButton(text="🚩Пожаловаться"),
             ]
         ],
@@ -340,8 +345,42 @@ def build_video_ready_keyboard(video_id: int) -> InlineKeyboardMarkup:
                     switch_inline_query=f"ready:{video_id}",
                 ),
                 InlineKeyboardButton(
+                    text="✂️ Обрезать",
+                    callback_data=f"cut:{video_id}",
+                ),
+                InlineKeyboardButton(
                     text="⌨️ Добавить теги",
                     callback_data=f"addtags:{video_id}",
+                ),
+            ]
+        ]
+    )
+
+
+def build_cut_pick_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Выбрать видео в @vid_robot",
+                    switch_inline_query_current_chat="",
+                )
+            ]
+        ]
+    )
+
+
+def build_cut_confirm_keyboard(cut_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить",
+                    callback_data=f"cutconfirm:{cut_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отменить",
+                    callback_data=f"cutcancel:{cut_id}",
                 ),
             ]
         ]
@@ -450,6 +489,8 @@ async def main() -> None:
     upload_state: dict[int, dict] = {}
     tag_state: dict[int, dict] = {}
     report_state: dict[int, dict] = {}
+    cut_state: dict[int, dict] = {}
+    cut_jobs: dict[str, dict] = {}
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -737,6 +778,14 @@ async def main() -> None:
             "message_id": sent.message_id,
         }
 
+    @dp.message(Command("cut"))
+    async def cut_handler(message: Message) -> None:
+        cut_state[message.from_user.id] = {"stage": "await_video"}
+        await message.answer(
+            "Выберите видео, которое хотите обрезать:",
+            reply_markup=build_cut_pick_keyboard(),
+        )
+
     @dp.message(Command("report"))
     async def report_handler(message: Message) -> None:
         report_state[message.from_user.id] = {"stage": "await_video"}
@@ -793,6 +842,124 @@ async def main() -> None:
             except TelegramBadRequest:
                 pass
         await callback.answer()
+
+    @dp.callback_query(F.data.startswith("cut:"))
+    async def cut_request_handler(callback: CallbackQuery) -> None:
+        raw_id = callback.data.split(":", 1)[1]
+        if not raw_id.isdigit():
+            await callback.answer()
+            return
+        video_id = int(raw_id)
+        video = await db.get_video_by_id(video_id)
+        if not video:
+            await callback.answer("Видео не найдено", show_alert=True)
+            return
+        user_id = callback.from_user.id
+        uploader_id = video.get("uploader_id")
+        if user_id != settings.admin_id and uploader_id and uploader_id != user_id:
+            await callback.answer("Обрезать можно только свои видео", show_alert=True)
+            return
+        if uploader_id is None and user_id != settings.admin_id:
+            await callback.answer("Обрезать можно только свои видео", show_alert=True)
+            return
+        cut_state[user_id] = {"stage": "await_range", "video_id": video_id}
+        if callback.message is not None:
+            await callback.message.answer(
+                "Чтобы обрезать видео отправь мне сообщение с какой по какую секунду надо обрезать: `00-05` или `0-5`",
+                parse_mode="Markdown",
+            )
+        else:
+            await bot.send_message(
+                user_id,
+                "Чтобы обрезать видео отправь мне сообщение с какой по какую секунду надо обрезать: `00-05` или `0-5`",
+                parse_mode="Markdown",
+            )
+        await callback.answer()
+
+    @dp.callback_query(F.data.startswith("cutconfirm:"))
+    async def cut_confirm_handler(callback: CallbackQuery) -> None:
+        cut_id = callback.data.split(":", 1)[1]
+        job = cut_jobs.get(cut_id)
+        if not job:
+            await callback.answer("Обрезка устарела", show_alert=True)
+            return
+        if callback.from_user.id != job.get("user_id"):
+            await callback.answer()
+            return
+        video_id = job["video_id"]
+        msg_id = job.get("message_id")
+        if msg_id is None:
+            await callback.answer()
+            return
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=msg_id,
+                reply_markup=None,
+            )
+        except TelegramBadRequest:
+            pass
+        try:
+            await bot.edit_message_media(
+                chat_id=callback.message.chat.id,
+                message_id=msg_id,
+                media=InputMediaVideo(media=job["file_id"]),
+            )
+            await bot.edit_message_caption(
+                chat_id=callback.message.chat.id,
+                message_id=msg_id,
+                caption=(
+                    "✅ Готово! Отправь видео обратно в чат, нажав на кнопку 💬 "
+                    "или добавь к видео свои теги ⌨️ (ключевые слова) для более удобного поиска"
+                ),
+                parse_mode="Markdown",
+                reply_markup=build_video_ready_keyboard(video_id),
+            )
+        except TelegramBadRequest:
+            await bot.send_video(
+                callback.message.chat.id,
+                job["file_id"],
+                caption=(
+                    "✅ Готово! Отправь видео обратно в чат, нажав на кнопку 💬 "
+                    "или добавь к видео свои теги ⌨️ (ключевые слова) для более удобного поиска"
+                ),
+                parse_mode="Markdown",
+                reply_markup=build_video_ready_keyboard(video_id),
+            )
+        await db.update_video_media(
+            video_id,
+            file_id=job["file_id"],
+            file_unique_id=job["file_unique_id"],
+            duration=job["duration"],
+            width=job["width"],
+            height=job["height"],
+            size=job["size"],
+            thumb_url=job.get("thumb_url"),
+        )
+        cut_jobs.pop(cut_id, None)
+        await callback.answer("Обрезка применена")
+
+    @dp.callback_query(F.data.startswith("cutcancel:"))
+    async def cut_cancel_handler(callback: CallbackQuery) -> None:
+        cut_id = callback.data.split(":", 1)[1]
+        job = cut_jobs.pop(cut_id, None)
+        if not job:
+            await callback.answer()
+            return
+        if callback.from_user.id != job.get("user_id"):
+            await callback.answer()
+            return
+        msg_id = job.get("message_id")
+        if msg_id is not None:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=callback.message.chat.id,
+                    message_id=msg_id,
+                    reply_markup=None,
+                )
+            except TelegramBadRequest:
+                pass
+        await callback.answer("Обрезка отменена")
 
     @dp.callback_query(F.data.startswith("complaint:"))
     async def complaint_admin_handler(callback: CallbackQuery) -> None:
@@ -884,6 +1051,100 @@ async def main() -> None:
                 pass
             tag_state.pop(message.from_user.id, None)
             return
+        cut_info = cut_state.get(message.from_user.id)
+        if cut_info and cut_info.get("stage") == "await_range":
+            range_text = text.strip()
+            parsed = parse_time_range(range_text)
+            if not parsed:
+                await message.answer(
+                    "Неверный формат. Пример: `00-05` или `0-5`",
+                    parse_mode="Markdown",
+                )
+                return
+            start_sec, end_sec = parsed
+            if start_sec < 0 or end_sec <= start_sec:
+                await message.answer("Неверный диапазон.")
+                return
+            video_id = int(cut_info["video_id"])
+            video = await db.get_video_by_id(video_id)
+            if not video:
+                cut_state.pop(message.from_user.id, None)
+                await message.answer("Видео не найдено.")
+                return
+            uploader_id = video.get("uploader_id")
+            if message.from_user.id != settings.admin_id and uploader_id != message.from_user.id:
+                cut_state.pop(message.from_user.id, None)
+                await message.answer("Обрезать можно только свои видео.")
+                return
+            if video.get("duration") and end_sec > int(video["duration"]):
+                await message.answer("Диапазон больше длительности видео.")
+                return
+            await _safe_delete_message(message.chat.id, message.message_id)
+            status_msg = await message.answer("Обрезаю видео...")
+            try:
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=status_msg.message_id,
+                    text="Обрезаю видео...",
+                )
+            except TelegramBadRequest:
+                pass
+            job_id = f"cut-{video_id}-{int(time.time())}"
+            source_url = video.get("source_url")
+            try:
+                result = await yt_download(
+                    source_url,
+                    settings.download_dir,
+                    job_id,
+                    start_time=start_sec,
+                    end_time=end_sec,
+                )
+            except YtDlpError as exc:
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=status_msg.message_id,
+                    text=f"Не удалось обрезать видео: {exc}",
+                )
+                cut_state.pop(message.from_user.id, None)
+                return
+            try:
+                sent = await bot.send_video(
+                    message.chat.id,
+                    FSInputFile(result.file_path),
+                    caption="Обрезка готова. Подтвердить?",
+                    reply_markup=build_cut_confirm_keyboard(job_id),
+                )
+            finally:
+                try:
+                    result.file_path.unlink(missing_ok=True)
+                except Exception:
+                    logger.warning("Failed to remove file %s", result.file_path)
+            if sent.video is None:
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=status_msg.message_id,
+                    text="Не удалось отправить обрезанное видео.",
+                )
+                cut_state.pop(message.from_user.id, None)
+                return
+            cut_jobs[job_id] = {
+                "user_id": message.from_user.id,
+                "video_id": video_id,
+                "message_id": sent.message_id,
+                "file_id": sent.video.file_id,
+                "file_unique_id": sent.video.file_unique_id,
+                "duration": sent.video.duration,
+                "width": sent.video.width,
+                "height": sent.video.height,
+                "size": sent.video.file_size,
+                "thumb_url": video.get("thumb_url"),
+            }
+            try:
+                await bot.delete_message(message.chat.id, status_msg.message_id)
+            except TelegramBadRequest:
+                pass
+            cut_state.pop(message.from_user.id, None)
+            return
         report_info = report_state.get(message.from_user.id)
         if report_info and report_info.get("stage") == "await_reason":
             reason = text.strip()
@@ -945,6 +1206,13 @@ async def main() -> None:
                 reply_markup=build_main_keyboard(),
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
+            )
+            return
+        if lowered in {"cut", "обрезать", "✂️ обрезать", "✂️обрезать"}:
+            cut_state[message.from_user.id] = {"stage": "await_video"}
+            await message.answer(
+                "Выберите видео, которое хотите обрезать:",
+                reply_markup=build_cut_pick_keyboard(),
             )
             return
         if lowered in {"/report", "report", "жалоба", "пожаловаться", "🚩пожаловаться"}:
@@ -1162,6 +1430,31 @@ async def main() -> None:
                         "📝 Напишите причину жалобы на это видео.",
                     )
                     return
+                cut_info = cut_state.get(chosen.from_user.id)
+                if cut_info and cut_info.get("stage") == "await_video":
+                    video = await db.get_video_by_id(video_id)
+                    if not video:
+                        await bot.send_message(chosen.from_user.id, "Видео не найдено.")
+                        cut_state.pop(chosen.from_user.id, None)
+                        return
+                    uploader_id = video.get("uploader_id")
+                    if chosen.from_user.id != settings.admin_id and uploader_id != chosen.from_user.id:
+                        await bot.send_message(
+                            chosen.from_user.id,
+                            "Обрезать можно только свои видео.",
+                        )
+                        cut_state.pop(chosen.from_user.id, None)
+                        return
+                    cut_state[chosen.from_user.id] = {
+                        "stage": "await_range",
+                        "video_id": video_id,
+                    }
+                    await bot.send_message(
+                        chosen.from_user.id,
+                        "Чтобы обрезать видео отправь мне сообщение с какой по какую секунду надо обрезать: `00-05` или `0-5`",
+                        parse_mode="Markdown",
+                    )
+                    return
                 await db.increment_usage(video_id)
                 await db.upsert_user_video_stat(chosen.from_user.id, video_id)
             return
@@ -1192,6 +1485,7 @@ async def main() -> None:
                     chosen.from_user.id,
                     "Подготовка уже запущена для этого видео.",
                 )
+            return
 
     try:
         await dp.start_polling(bot)

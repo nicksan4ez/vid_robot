@@ -253,7 +253,14 @@ def _find_downloaded_file(directory: Path, prefix: str) -> Optional[Path]:
     return matches[0]
 
 
-async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadResult:
+async def download(
+    source_url: str,
+    output_dir: Path,
+    job_id: str,
+    *,
+    start_time: int | None = None,
+    end_time: int | None = None,
+) -> DownloadResult:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     format_candidates = [
@@ -297,6 +304,14 @@ async def download(source_url: str, output_dir: Path, job_id: str) -> DownloadRe
             "-o",
             output_template,
         ]
+        if start_time is not None and end_time is not None:
+            args.extend(
+                [
+                    "--download-sections",
+                    f"*{start_time}-{end_time}",
+                    "--force-keyframes-at-cuts",
+                ]
+            )
         args.extend(_common_yt_dlp_args())
         code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(120.0))
         if code == 0:
