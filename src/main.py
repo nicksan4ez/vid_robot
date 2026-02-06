@@ -1054,12 +1054,16 @@ async def main() -> None:
         cut_info = cut_state.get(message.from_user.id)
         if cut_info and cut_info.get("stage") == "await_range":
             range_text = text.strip()
+            if "-" not in range_text:
+                return
             parsed = parse_time_range(range_text)
             if not parsed:
-                await message.answer(
-                    "Неверный формат. Пример: `00-05` или `0-5`",
-                    parse_mode="Markdown",
-                )
+                if not cut_info.get("hinted"):
+                    await message.answer(
+                        "Неверный формат. Пример: `00-05` или `0-5`",
+                        parse_mode="Markdown",
+                    )
+                    cut_info["hinted"] = True
                 return
             start_sec, end_sec = parsed
             if start_sec < 0 or end_sec <= start_sec:
