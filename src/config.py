@@ -35,6 +35,8 @@ class Settings:
     admin_id: int
     piped_api_base_url: str
     piped_timeout_seconds: float
+    stat_schedule_default: str
+    stat_scheduler_tick_seconds: int
 
 
 def load_settings() -> Settings:
@@ -68,4 +70,6 @@ def load_settings() -> Settings:
         admin_id=_get_int("ADMIN_ID", 0),
         piped_api_base_url=piped_base,
         piped_timeout_seconds=_get_float("PIPED_TIMEOUT_SECONDS", 4.0),
+        stat_schedule_default=os.getenv("STAT_SCHEDULE_DEFAULT", "09:00").strip(),
+        stat_scheduler_tick_seconds=_get_int("STAT_SCHEDULER_TICK_SECONDS", 30),
     )

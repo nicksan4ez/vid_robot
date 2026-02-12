@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -458,6 +459,51 @@ def format_user_html(user: object) -> str:
     return safe_name
 
 
+def parse_hhmm(value: str) -> tuple[int, int] | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return None
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour, minute
+
+
+def format_stats_text(stats: dict, top_videos: list[dict], schedule_value: str) -> str:
+    lines = [
+        "Статистика сервиса",
+        "",
+        f"Видео: всего {stats.get('videos_total', 0)}, готовых {stats.get('videos_ready', 0)}, заблокировано {stats.get('videos_blocked', 0)}",
+        f"Загрузки пользователей: {stats.get('uploads_total', 0)}",
+        f"Новых видео за 24ч: {stats.get('videos_24h', 0)}",
+        f"Отправок в чаты (total use_count): {stats.get('sends_total', 0)}",
+        f"Пользователей (по использованию): {stats.get('users_total', 0)}, активных за 24ч: {stats.get('users_24h', 0)}",
+        f"Связок пользователь-видео: {stats.get('user_video_pairs', 0)}",
+        f"Тегов (video_queries): {stats.get('tags_total', 0)}",
+        (
+            "Жалобы: всего "
+            f"{stats.get('complaints_total', 0)}, pending {stats.get('complaints_pending', 0)}, "
+            f"blocked {stats.get('complaints_blocked', 0)}, skipped {stats.get('complaints_skipped', 0)}, "
+            f"ban {stats.get('complaints_banned', 0)}"
+        ),
+        f"Заблокированных стукачей: {stats.get('banned_reporters', 0)}",
+        f"Расписание: {schedule_value}",
+        "",
+        "TOP видео:",
+    ]
+    if not top_videos:
+        lines.append("Нет данных")
+    else:
+        for idx, row in enumerate(top_videos, start=1):
+            title = (row.get("title") or "Видео").replace("\n", " ").strip()
+            lines.append(f"{idx}. {title} — {row.get('use_count', 0)}")
+    return "\n".join(lines)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     load_dotenv()
@@ -491,6 +537,24 @@ async def main() -> None:
     report_state: dict[int, dict] = {}
     cut_state: dict[int, dict] = {}
     cut_jobs: dict[str, dict] = {}
+
+    async def get_stat_schedule_value() -> str:
+        configured = await db.get_setting("stat_schedule")
+        if configured is None or configured.strip() == "":
+            return settings.stat_schedule_default
+        return configured.strip()
+
+    async def build_stats_message() -> str:
+        stats = await db.get_service_stats()
+        top_videos = await db.get_top_videos(limit=10)
+        schedule_value = await get_stat_schedule_value()
+        return format_stats_text(stats, top_videos, schedule_value)
+
+    async def send_stats_to_admin() -> None:
+        if settings.admin_id <= 0:
+            return
+        text = await build_stats_message()
+        await bot.send_message(settings.admin_id, text)
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
@@ -793,6 +857,40 @@ async def main() -> None:
             "Выберите видео, на которое хотите пожаловаться:",
             reply_markup=build_report_pick_keyboard(),
         )
+
+    @dp.message(Command("stat"))
+    async def stat_handler(message: Message) -> None:
+        if message.from_user.id != settings.admin_id:
+            return
+        await message.answer(await build_stats_message())
+
+    @dp.message(Command("stat_schedule"))
+    async def stat_schedule_handler(message: Message, command: CommandObject) -> None:
+        if message.from_user.id != settings.admin_id:
+            return
+        args = (command.args or "").strip()
+        if not args:
+            current = await get_stat_schedule_value()
+            await message.answer(
+                "Текущее расписание статистики: "
+                f"`{current}`\n"
+                "Изменить: `/stat_schedule HH:MM`\n"
+                "Отключить: `/stat_schedule off`",
+                parse_mode="Markdown",
+            )
+            return
+        if args.lower() in {"off", "disable", "none", "выкл"}:
+            await db.set_setting("stat_schedule", "off")
+            await message.answer("Расписание статистики отключено.")
+            return
+        parsed = parse_hhmm(args)
+        if parsed is None:
+            await message.answer("Неверный формат. Используйте `HH:MM`, например `09:30`.", parse_mode="Markdown")
+            return
+        hour, minute = parsed
+        normalized = f"{hour:02d}:{minute:02d}"
+        await db.set_setting("stat_schedule", normalized)
+        await message.answer(f"Новое расписание статистики: `{normalized}`", parse_mode="Markdown")
 
     @dp.callback_query(F.data == "upload_cancel")
     async def upload_cancel_handler(callback: CallbackQuery) -> None:
@@ -1491,9 +1589,32 @@ async def main() -> None:
                 )
             return
 
+    async def stat_scheduler_loop() -> None:
+        last_sent_key = ""
+        while True:
+            try:
+                schedule_value = (await get_stat_schedule_value()).strip().lower()
+                parsed = parse_hhmm(schedule_value)
+                if settings.admin_id > 0 and parsed is not None:
+                    hour, minute = parsed
+                    now = time.localtime()
+                    if now.tm_hour == hour and now.tm_min == minute:
+                        key = f"{now.tm_year}:{now.tm_yday}:{hour:02d}:{minute:02d}"
+                        if key != last_sent_key:
+                            await send_stats_to_admin()
+                            last_sent_key = key
+            except Exception:
+                logger.exception("Stat scheduler failed")
+            await asyncio.sleep(max(5, settings.stat_scheduler_tick_seconds))
+
+    scheduler_task = asyncio.create_task(stat_scheduler_loop())
+
     try:
         await dp.start_polling(bot)
     finally:
+        scheduler_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await scheduler_task
         await db.close()
 
 
