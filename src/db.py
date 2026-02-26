@@ -133,6 +133,12 @@ class Database:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            );
             """
         )
         await self._ensure_columns()
@@ -142,6 +148,12 @@ class Database:
         assert self._conn is not None
         await self._ensure_video_columns()
         await self._ensure_candidate_columns()
+        await self._conn.execute(
+            """
+            INSERT OR IGNORE INTO users (id, first_seen_at, last_seen_at)
+            SELECT user_id, 0, last_used_at FROM user_video_stats
+            """
+        )
 
     async def _ensure_video_columns(self) -> None:
         assert self._conn is not None
@@ -425,6 +437,19 @@ class Database:
         )
         await self._conn.commit()
 
+    async def upsert_user(self, user_id: int) -> None:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        await self._conn.execute(
+            """
+            INSERT INTO users (id, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+            """,
+            (user_id, now_ts, now_ts),
+        )
+        await self._conn.commit()
+
     async def get_user_top_videos(self, user_id: int, limit: int) -> list[dict]:
         assert self._conn is not None
         cursor = await self._conn.execute(
@@ -632,7 +657,8 @@ class Database:
                 (SELECT COALESCE(SUM(use_count), 0) FROM videos) AS sends_total,
                 (SELECT COUNT(*) FROM user_video_stats) AS user_video_pairs,
                 (SELECT COUNT(DISTINCT user_id) FROM user_video_stats) AS users_total,
-                (SELECT COUNT(DISTINCT user_id) FROM user_video_stats WHERE last_used_at >= ?) AS users_24h,
+                (SELECT COUNT(DISTINCT id) FROM users WHERE last_seen_at >= ?) AS users_24h,
+                (SELECT COUNT(DISTINCT id) FROM users WHERE first_seen_at >= ?) AS users_new_24h,
                 (SELECT COUNT(*) FROM video_queries) AS tags_total,
                 (SELECT COUNT(*) FROM complaints) AS complaints_total,
                 (SELECT COUNT(*) FROM complaints WHERE status = 'pending') AS complaints_pending,
@@ -641,7 +667,7 @@ class Database:
                 (SELECT COUNT(*) FROM complaints WHERE status = 'banned') AS complaints_banned,
                 (SELECT COUNT(*) FROM report_bans) AS banned_reporters
             """,
-            (int(time.time()) - 86400, int(time.time()) - 86400),
+            (int(time.time()) - 86400, int(time.time()) - 86400, int(time.time()) - 86400),
         )
         row = await cursor.fetchone()
         await cursor.close()
@@ -658,6 +684,25 @@ class Database:
             LIMIT ?
             """,
             (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(row) for row in rows]
+
+    async def get_top_videos_24h(self, limit: int = 10) -> list[dict]:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        cursor = await self._conn.execute(
+            """
+            SELECT v.id, v.title, COUNT(s.user_id) as active_users
+            FROM user_video_stats s
+            JOIN videos v ON v.id = s.video_id
+            WHERE s.last_used_at >= ? AND v.file_id IS NOT NULL AND v.blocked = 0
+            GROUP BY v.id
+            ORDER BY active_users DESC
+            LIMIT ?
+            """,
+            (now_ts - 86400, limit),
         )
         rows = await cursor.fetchall()
         await cursor.close()

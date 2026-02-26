@@ -298,7 +298,7 @@ def build_inline_search_keyboard(query_text: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Выбрать видео:",
+                    text="Найти",
                     switch_inline_query_current_chat=f"yt:{query_text}",
                 )
             ]
@@ -473,35 +473,68 @@ def parse_hhmm(value: str) -> tuple[int, int] | None:
     return hour, minute
 
 
-def format_stats_text(stats: dict, top_videos: list[dict], schedule_value: str) -> str:
+def format_stats_text(stats: dict, top_videos: list[dict], top_videos_24h: list[dict], schedule_value: str) -> tuple[str, InlineKeyboardMarkup]:
     lines = [
-        "Статистика сервиса",
+        "<b>📊 Статистика сервиса</b>",
         "",
-        f"Видео: всего {stats.get('videos_total', 0)}, готовых {stats.get('videos_ready', 0)}, заблокировано {stats.get('videos_blocked', 0)}",
-        f"Загрузки пользователей: {stats.get('uploads_total', 0)}",
-        f"Новых видео за 24ч: {stats.get('videos_24h', 0)}",
-        f"Отправок в чаты (total use_count): {stats.get('sends_total', 0)}",
-        f"Пользователей (по использованию): {stats.get('users_total', 0)}, активных за 24ч: {stats.get('users_24h', 0)}",
-        f"Связок пользователь-видео: {stats.get('user_video_pairs', 0)}",
-        f"Тегов (video_queries): {stats.get('tags_total', 0)}",
-        (
-            "Жалобы: всего "
-            f"{stats.get('complaints_total', 0)}, pending {stats.get('complaints_pending', 0)}, "
-            f"blocked {stats.get('complaints_blocked', 0)}, skipped {stats.get('complaints_skipped', 0)}, "
-            f"ban {stats.get('complaints_banned', 0)}"
-        ),
-        f"Заблокированных стукачей: {stats.get('banned_reporters', 0)}",
-        f"Расписание: {schedule_value}",
+        "🚀 <b>Видеотека:</b>",
+        f"• Всего: {stats.get('videos_total', 0)}",
+        f"• Готовых: {stats.get('videos_ready', 0)}",
+        f"• Заблокировано: {stats.get('videos_blocked', 0)}",
+        f"• Загрузок от пользователей: {stats.get('uploads_total', 0)}",
         "",
-        "TOP видео:",
+        "⏱ <b>Активность за 24 часа:</b>",
+        f"• Новых видео: {stats.get('videos_24h', 0)}",
+        f"• Новых пользователей: {stats.get('users_new_24h', 0)}",
+        f"• Активных пользователей: {stats.get('users_24h', 0)}",
+        "",
+        "👥 <b>Пользователи (total):</b>",
+        f"• Всего: {stats.get('users_total', 0)}",
+        f"• Связок юзер-видео: {stats.get('user_video_pairs', 0)}",
+        "",
+        "📈 <b>Отправки:</b>",
+        f"• Всего отправлено: {stats.get('sends_total', 0)}",
+        f"• Тегов (video_queries): {stats.get('tags_total', 0)}",
+        "",
+        "🚩 <b>Жалобы:</b>",
+        f"Всего: {stats.get('complaints_total', 0)} | Ожидают: {stats.get('complaints_pending', 0)}",
+        f"Заблокировано: {stats.get('complaints_blocked', 0)} | Пропущено: {stats.get('complaints_skipped', 0)}",
+        f"Баны: {stats.get('complaints_banned', 0)} | Заблоканных стукачей: {stats.get('banned_reporters', 0)}",
+        "",
+        f"🕒 Расписание рассылки: {schedule_value}",
     ]
-    if not top_videos:
-        lines.append("Нет данных")
-    else:
-        for idx, row in enumerate(top_videos, start=1):
-            title = (row.get("title") or "Видео").replace("\n", " ").strip()
-            lines.append(f"{idx}. {title} — {row.get('use_count', 0)}")
-    return "\n".join(lines)
+
+    kb_rows = []
+
+    if top_videos_24h:
+        lines.append("")
+        lines.append("🔥 <b>ТОП за 24 часа:</b>")
+        row = []
+        for idx, row_data in enumerate((top_videos_24h or [])[:5], start=1):
+            title = (row_data.get("title") or "Видео").replace("\n", " ").strip()
+            uses = row_data.get('active_users', 0)
+            lines.append(f"{idx}. {title} — {uses} юзеров")
+            vid_id = row_data.get('id')
+            if vid_id:
+                row.append(InlineKeyboardButton(text=f"🔥 {idx}", switch_inline_query_current_chat=f"ready:{vid_id}"))
+        if row:
+            kb_rows.append(row)
+
+    if top_videos:
+        lines.append("")
+        lines.append("🏆 <b>ТОП за всё время:</b>")
+        row = []
+        for idx, row_data in enumerate((top_videos or [])[:5], start=1):
+            title = (row_data.get("title") or "Видео").replace("\n", " ").strip()
+            lines.append(f"{idx}. {title} — {row_data.get('use_count', 0)}")
+            vid_id = row_data.get('id')
+            if vid_id:
+                row.append(InlineKeyboardButton(text=f"🏆 {idx}", switch_inline_query_current_chat=f"ready:{vid_id}"))
+        if row:
+            kb_rows.append(row)
+
+    text = "\n".join(lines)
+    return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
 async def main() -> None:
@@ -544,20 +577,22 @@ async def main() -> None:
             return settings.stat_schedule_default
         return configured.strip()
 
-    async def build_stats_message() -> str:
+    async def build_stats_message() -> tuple[str, InlineKeyboardMarkup]:
         stats = await db.get_service_stats()
-        top_videos = await db.get_top_videos(limit=10)
+        top_videos = await db.get_top_videos(limit=5)
+        top_videos_24h = await db.get_top_videos_24h(limit=5)
         schedule_value = await get_stat_schedule_value()
-        return format_stats_text(stats, top_videos, schedule_value)
+        return format_stats_text(stats, top_videos, top_videos_24h, schedule_value)
 
     async def send_stats_to_admin() -> None:
         if settings.admin_id <= 0:
             return
-        text = await build_stats_message()
-        await bot.send_message(settings.admin_id, text)
+        text, kb = await build_stats_message()
+        await bot.send_message(settings.admin_id, text, reply_markup=kb, parse_mode="HTML")
 
     @dp.inline_query()
     async def inline_query_handler(inline_query: InlineQuery) -> None:
+        await db.upsert_user(inline_query.from_user.id)
         query = (inline_query.query or "").strip()
         if query in {"🚩Пожаловаться", "🚩пожаловаться", "yt:🚩Пожаловаться", "yt:🚩пожаловаться"}:
             await inline_query.answer(
@@ -778,6 +813,7 @@ async def main() -> None:
 
     @dp.message(CommandStart())
     async def start_handler(message: Message, command: CommandObject) -> None:
+        await db.upsert_user(message.from_user.id)
         if not command.args:
             await message.answer(
                 "Привет! Используйте inline-режим: `@vid_robot` _запрос_\n"
@@ -811,7 +847,7 @@ async def main() -> None:
             return
         keyboard = build_inline_search_keyboard(token_info.query_text)
         await message.answer(
-            f"Нажми на кнопку и выбери нужное видео 👇",
+            f"Нажми на кнопку и введи в поиске нужное видео 👇",
             reply_markup=keyboard,
         )
 
@@ -862,7 +898,8 @@ async def main() -> None:
     async def stat_handler(message: Message) -> None:
         if message.from_user.id != settings.admin_id:
             return
-        await message.answer(await build_stats_message())
+        text, kb = await build_stats_message()
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
     @dp.message(Command("stat_schedule"))
     async def stat_schedule_handler(message: Message, command: CommandObject) -> None:
