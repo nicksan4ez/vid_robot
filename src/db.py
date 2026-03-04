@@ -656,7 +656,7 @@ class Database:
                 (SELECT COUNT(*) FROM videos WHERE created_at >= ?) AS videos_24h,
                 (SELECT COALESCE(SUM(use_count), 0) FROM videos) AS sends_total,
                 (SELECT COUNT(*) FROM user_video_stats) AS user_video_pairs,
-                (SELECT COUNT(DISTINCT user_id) FROM user_video_stats) AS users_total,
+                (SELECT COUNT(DISTINCT id) FROM users) AS users_total,
                 (SELECT COUNT(DISTINCT id) FROM users WHERE last_seen_at >= ?) AS users_24h,
                 (SELECT COUNT(DISTINCT id) FROM users WHERE first_seen_at >= ?) AS users_new_24h,
                 (SELECT COUNT(*) FROM video_queries) AS tags_total,
