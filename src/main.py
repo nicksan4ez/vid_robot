@@ -473,7 +473,13 @@ def parse_hhmm(value: str) -> tuple[int, int] | None:
     return hour, minute
 
 
-def format_stats_text(stats: dict, top_videos: list[dict], top_videos_24h: list[dict], schedule_value: str) -> tuple[str, InlineKeyboardMarkup]:
+def format_stats_text(
+    stats: dict,
+    top_videos: list[dict],
+    top_videos_24h: list[dict],
+    added_today: list[dict],
+    schedule_value: str,
+) -> tuple[str, InlineKeyboardMarkup]:
     lines = [
         "<b>📊 Статистика сервиса</b>",
         "",
@@ -493,6 +499,7 @@ def format_stats_text(stats: dict, top_videos: list[dict], top_videos_24h: list[
         f"• Связок юзер-видео: {stats.get('user_video_pairs', 0)}",
         "",
         "📈 <b>Отправки:</b>",
+        f"• Сегодня отправлено: {stats.get('sends_today', 0)}",
         f"• Всего отправлено: {stats.get('sends_total', 0)}",
         f"• Тегов (video_queries): {stats.get('tags_total', 0)}",
         "",
@@ -532,6 +539,27 @@ def format_stats_text(stats: dict, top_videos: list[dict], top_videos_24h: list[
                 row.append(InlineKeyboardButton(text=f"🏆 {idx}", switch_inline_query_current_chat=f"ready:{vid_id}"))
         if row:
             kb_rows.append(row)
+
+    if added_today:
+        lines.append("")
+        lines.append("🆕 <b>Добавлено сегодня:</b>")
+        row = []
+        for idx, row_data in enumerate(added_today[:10], start=1):
+            title = (row_data.get("title") or "Видео").replace("\n", " ").strip()
+            created_at = int(row_data.get("created_at", 0) or 0)
+            tm = time.localtime(created_at)
+            blocked = bool(row_data.get("blocked"))
+            suffix = " [🚫]" if blocked else ""
+            lines.append(f"{idx}. {tm.tm_hour:02d}:{tm.tm_min:02d} — {title}{suffix}")
+            vid_id = row_data.get("id")
+            if vid_id:
+                row.append(InlineKeyboardButton(text=f"🆕 {idx}", switch_inline_query_current_chat=f"ready:{vid_id}"))
+        if row:
+            kb_rows.append(row)
+    else:
+        lines.append("")
+        lines.append("🆕 <b>Добавлено сегодня:</b>")
+        lines.append("• Пока новых видео нет.")
 
     text = "\n".join(lines)
     return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -581,8 +609,9 @@ async def main() -> None:
         stats = await db.get_service_stats()
         top_videos = await db.get_top_videos(limit=5)
         top_videos_24h = await db.get_top_videos_24h(limit=5)
+        added_today = await db.get_videos_added_today(limit=10)
         schedule_value = await get_stat_schedule_value()
-        return format_stats_text(stats, top_videos, top_videos_24h, schedule_value)
+        return format_stats_text(stats, top_videos, top_videos_24h, added_today, schedule_value)
 
     async def send_stats_to_admin() -> None:
         if settings.admin_id <= 0:
@@ -1594,8 +1623,7 @@ async def main() -> None:
                         parse_mode="Markdown",
                     )
                     return
-                await db.increment_usage(video_id)
-                await db.upsert_user_video_stat(chosen.from_user.id, video_id)
+                await db.record_video_send(chosen.from_user.id, video_id)
             return
         if result_id.startswith("yt:"):
             youtube_id = result_id.split(":", 1)[1]

@@ -139,6 +139,20 @@ class Database:
                 first_seen_at INTEGER NOT NULL,
                 last_seen_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS video_sends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                video_id INTEGER NOT NULL,
+                sent_at INTEGER NOT NULL,
+                FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_video_sends_sent_at
+                ON video_sends(sent_at);
+
+            CREATE INDEX IF NOT EXISTS idx_video_sends_video
+                ON video_sends(video_id);
             """
         )
         await self._ensure_columns()
@@ -423,6 +437,28 @@ class Database:
         )
         await self._conn.commit()
 
+    async def record_video_send(self, user_id: int, video_id: int) -> None:
+        assert self._conn is not None
+        now_ts = int(time.time())
+        await self._conn.execute(
+            "UPDATE videos SET use_count = use_count + 1 WHERE id = ?",
+            (video_id,),
+        )
+        await self._conn.execute(
+            """
+            INSERT INTO user_video_stats (user_id, video_id, use_count, last_used_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, video_id)
+            DO UPDATE SET use_count = use_count + 1, last_used_at = excluded.last_used_at
+            """,
+            (user_id, video_id, now_ts),
+        )
+        await self._conn.execute(
+            "INSERT INTO video_sends (user_id, video_id, sent_at) VALUES (?, ?, ?)",
+            (user_id, video_id, now_ts),
+        )
+        await self._conn.commit()
+
     async def upsert_user_video_stat(self, user_id: int, video_id: int) -> None:
         assert self._conn is not None
         now_ts = int(time.time())
@@ -655,6 +691,11 @@ class Database:
                 (SELECT COUNT(*) FROM videos WHERE uploader_id IS NOT NULL) AS uploads_total,
                 (SELECT COUNT(*) FROM videos WHERE created_at >= ?) AS videos_24h,
                 (SELECT COALESCE(SUM(use_count), 0) FROM videos) AS sends_total,
+                (
+                    SELECT COUNT(*)
+                    FROM video_sends
+                    WHERE date(sent_at, 'unixepoch', 'localtime') = date('now', 'localtime')
+                ) AS sends_today,
                 (SELECT COUNT(*) FROM user_video_stats) AS user_video_pairs,
                 (SELECT COUNT(DISTINCT id) FROM users) AS users_total,
                 (SELECT COUNT(DISTINCT id) FROM users WHERE last_seen_at >= ?) AS users_24h,
@@ -681,6 +722,22 @@ class Database:
             FROM videos
             WHERE file_id IS NOT NULL AND blocked = 0
             ORDER BY use_count DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [dict(row) for row in rows]
+
+    async def get_videos_added_today(self, limit: int = 20) -> list[dict]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """
+            SELECT id, title, created_at, blocked
+            FROM videos
+            WHERE date(created_at, 'unixepoch', 'localtime') = date('now', 'localtime')
+            ORDER BY created_at DESC
             LIMIT ?
             """,
             (limit,),
