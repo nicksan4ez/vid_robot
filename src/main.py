@@ -49,6 +49,22 @@ YOUTUBE_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+UPLOAD_LINK_PROMPT = (
+    "Для загрузки своего видео пришлите ссылку на ролик.\n"
+    "Поддерживаемые популярные сайты: YouTube/Shorts, TikTok, Instagram Reels, "
+    "VK, Vimeo, X/Twitter, Reddit.\n\n"
+    "Примеры:\n"
+    "`https://www.youtube.com/watch?v=dQw4w9WgXcQ`\n"
+    "`https://vk.com/video-108468_456244386`\n"
+    "`https://www.tiktok.com/@vid_robot/video/1234567890123456789`\n"
+    "\nВидео должно быть короче *60 секунд.*"
+)
+
+UPLOAD_INVALID_LINK_TEXT = (
+    "Неверная ссылка. Пришлите ссылку на видео с YouTube, TikTok, "
+    "Instagram Reels, VK, Vimeo, X/Twitter или Reddit."
+)
+
 def is_age_restricted_error(message: str) -> bool:
     lowered = message.lower()
     return any(marker in lowered for marker in AGE_RESTRICTED_MARKERS)
@@ -891,14 +907,8 @@ async def main() -> None:
 
     @dp.message(Command("upload"))
     async def upload_handler(message: Message) -> None:
-        prompt = (
-            "Для загрузки своего видео пришлите ссылку формата "
-            "`https://www.youtube.com/watch?v=dQw4w9WgXcQ` "
-            "`https://www.tiktok.com/@vid_robot/video/1234567890123456789` "
-            "\nВидео должно быть короче *60 секунд.*"
-        )
         sent = await message.answer(
-            prompt,
+            UPLOAD_LINK_PROMPT,
             reply_markup=build_upload_cancel_keyboard(),
             parse_mode="Markdown",
         )
@@ -1401,14 +1411,8 @@ async def main() -> None:
             )
             return
         if lowered in {"upload", "загрузить свое", "загрузить своё", "⬇️загрузить свое", "⬇️загрузить своё"}:
-            prompt = (
-                "Для загрузки своего видео пришлите ссылку формата "
-                "`https://www.youtube.com/watch?v=dQw4w9WgXcQ` "
-                "`https://www.tiktok.com/@vid_robot/video/1234567890123456789` "
-                "\nВидео должно быть короче *60 секунд.*"
-            )
             sent = await message.answer(
-                prompt,
+                UPLOAD_LINK_PROMPT,
                 reply_markup=build_upload_cancel_keyboard(),
                 disable_web_page_preview=True,
                 parse_mode="Markdown",
@@ -1429,17 +1433,13 @@ async def main() -> None:
                         await bot.edit_message_text(
                             chat_id=message.chat.id,
                             message_id=state["message_id"],
-                            text=(
-                                "Неверная ссылка. Пришлите ссылку формата "
-                                "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-                            ),
+                            text=UPLOAD_INVALID_LINK_TEXT,
                             reply_markup=build_upload_cancel_keyboard(),
                             disable_web_page_preview=True,
                         )
                     except TelegramBadRequest:
                         await message.answer(
-                            "Неверная ссылка. Пришлите ссылку формата "
-                            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                            UPLOAD_INVALID_LINK_TEXT,
                             reply_markup=build_upload_cancel_keyboard(),
                             disable_web_page_preview=True,
                         )
