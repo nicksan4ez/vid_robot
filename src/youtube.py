@@ -11,6 +11,21 @@ from typing import Optional
 from .db import YtCandidate
 
 MAX_FILESIZE = "49M"
+FORMAT_CANDIDATES = (
+    "bestvideo[ext=mp4][vcodec^=avc1][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]",
+    "bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]",
+    "bestvideo[ext=mp4][vcodec^=avc1][height<=360]+bestaudio[ext=m4a]/best[ext=mp4][height<=360]",
+    "bestvideo[vcodec^=avc1][height<=720]+bestaudio/best[height<=720]",
+    "bestvideo[vcodec^=avc1][height<=480]+bestaudio/best[height<=480]",
+    "bestvideo[vcodec^=avc1][height<=360]+bestaudio/best[height<=360]",
+    "best[ext=mp4][height<=720]",
+    "best[ext=mp4][height<=480]",
+    "best[ext=mp4][height<=360]",
+    "best[height<=720]",
+    "best[height<=480]",
+    "best[height<=360]",
+    "best",
+)
 logger = logging.getLogger("vid_robot.ytdlp")
 
 
@@ -43,7 +58,7 @@ def _get_timeout(default: float) -> float:
         return default
 
 
-def _common_yt_dlp_args() -> list[str]:
+def _common_yt_dlp_args(*, include_cookies: bool = True) -> list[str]:
     args: list[str] = []
     js_runtimes = os.getenv("YTDLP_JS_RUNTIMES", "").strip()
     if js_runtimes:
@@ -51,7 +66,7 @@ def _common_yt_dlp_args() -> list[str]:
     remote_components = os.getenv("YTDLP_REMOTE_COMPONENTS", "").strip()
     if remote_components:
         args.extend(["--remote-components", remote_components])
-    cookies_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    cookies_file = os.getenv("YTDLP_COOKIES_FILE", "").strip() if include_cookies else ""
     if cookies_file:
         cookie_path = Path(cookies_file)
         if not cookie_path.is_absolute():
@@ -71,6 +86,18 @@ def _common_yt_dlp_args() -> list[str]:
     if extractor_args:
         args.extend(["--extractor-args", extractor_args])
     return args
+
+
+def _formats_unavailable(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "requested format is not available",
+            "no video formats found",
+            "only images are available",
+        )
+    )
 
 
 async def _run_yt_dlp(args: list[str], timeout_seconds: float | None = None) -> tuple[int, str, str]:
@@ -263,63 +290,75 @@ async def download(
 ) -> DownloadResult:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    format_candidates = [
-        "bestvideo[ext=mp4][vcodec^=avc1][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]",
-        "bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]",
-        "bestvideo[ext=mp4][vcodec^=avc1][height<=360]+bestaudio[ext=m4a]/best[ext=mp4][height<=360]",
-        "bestvideo[vcodec^=avc1][height<=720]+bestaudio/best[height<=720]",
-        "bestvideo[vcodec^=avc1][height<=480]+bestaudio/best[height<=480]",
-        "bestvideo[vcodec^=avc1][height<=360]+bestaudio/best[height<=360]",
-        "best[ext=mp4][height<=720]",
-        "best[ext=mp4][height<=480]",
-        "best[ext=mp4][height<=360]",
-        "best[height<=720]",
-        "best[height<=480]",
-        "best[height<=360]",
-        "best",
-    ]
-
     output_template = str(output_dir / f"{job_id}.%(ext)s")
 
-    last_error = ""
-    for fmt in format_candidates:
-        _cleanup_prefix(output_dir, job_id)
-        args = [
-            "yt-dlp",
-            source_url,
-            "-f",
-            fmt,
-            "--max-filesize",
-            MAX_FILESIZE,
-            "--merge-output-format",
-            "mp4",
-            "--remux-video",
-            "mp4",
-            "--recode-video",
-            "mp4",
-            "--postprocessor-args",
-            "FFmpegVideoConvertor:-c:v libx264 -profile:v main -level 4.0 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart",
-            "--no-playlist",
-            "--no-warnings",
-            "-o",
-            output_template,
-        ]
-        if start_time is not None and end_time is not None:
-            args.extend(
-                [
-                    "--download-sections",
-                    f"*{start_time}-{end_time}",
-                    "--force-keyframes-at-cuts",
-                ]
+    async def try_formats(
+        common_args: list[str],
+    ) -> tuple[DownloadResult | None, str, bool]:
+        last_error = ""
+        only_format_errors = True
+        for fmt in FORMAT_CANDIDATES:
+            _cleanup_prefix(output_dir, job_id)
+            args = [
+                "yt-dlp",
+                source_url,
+                "-f",
+                fmt,
+                "--max-filesize",
+                MAX_FILESIZE,
+                "--merge-output-format",
+                "mp4",
+                "--remux-video",
+                "mp4",
+                "--recode-video",
+                "mp4",
+                "--postprocessor-args",
+                "FFmpegVideoConvertor:-c:v libx264 -profile:v main -level 4.0 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart",
+                "--no-playlist",
+                "--no-warnings",
+                "-o",
+                output_template,
+            ]
+            if start_time is not None and end_time is not None:
+                args.extend(
+                    [
+                        "--download-sections",
+                        f"*{start_time}-{end_time}",
+                        "--force-keyframes-at-cuts",
+                    ]
+                )
+            args.extend(common_args)
+            code, out, err = await _run_yt_dlp(
+                args, timeout_seconds=_get_timeout(120.0)
             )
-        args.extend(_common_yt_dlp_args())
-        code, out, err = await _run_yt_dlp(args, timeout_seconds=_get_timeout(120.0))
-        if code == 0:
-            path = _find_downloaded_file(output_dir, job_id)
-            if path is not None and path.exists() and path.stat().st_size > 0:
-                return DownloadResult(file_path=path)
-            last_error = "download finished but file is missing or empty"
-        else:
-            last_error = err.strip() or out.strip() or "yt-dlp download failed"
+            if code == 0:
+                path = _find_downloaded_file(output_dir, job_id)
+                if path is not None and path.exists() and path.stat().st_size > 0:
+                    return DownloadResult(file_path=path), "", only_format_errors
+                last_error = "download finished but file is missing or empty"
+                only_format_errors = False
+                continue
+
+            combined_error = "\n".join(part for part in (err.strip(), out.strip()) if part)
+            last_error = combined_error or "yt-dlp download failed"
+            if not _formats_unavailable(combined_error):
+                only_format_errors = False
+
+        return None, last_error, only_format_errors
+
+    common_args = _common_yt_dlp_args()
+    result, last_error, only_format_errors = await try_formats(common_args)
+    if result is not None:
+        return result
+
+    if "--cookies" in common_args and only_format_errors:
+        logger.warning(
+            "yt-dlp returned no video formats with cookies; retrying without cookies"
+        )
+        result, last_error, _ = await try_formats(
+            _common_yt_dlp_args(include_cookies=False)
+        )
+        if result is not None:
+            return result
 
     raise YtDlpError(last_error)
